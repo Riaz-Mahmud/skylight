@@ -630,7 +630,7 @@ export class Renderer {
   private drawDestArc(cfg: Config, proj: ProjOpts, v: Visible): void {
     const ac = v.tr.ac;
     if (ac.lat == null || ac.lon == null || ac.destLat == null || ac.destLon == null) return;
-    if (!routePlausible(ac)) return;
+    if (!routePlausible(ac, cfg)) return;
     const brg = bearing(ac.lat, ac.lon, ac.destLat, ac.destLon) * (Math.PI / 180);
     const stepM = cfg.radiusMiles * 1609.34 * 0.5;
     const ahead = project(
@@ -789,7 +789,7 @@ export class Renderer {
     if (f.speed && ac.gs != null) sub.push(`${Math.round(ac.gs)} kt`);
     if (sub.length) out.push({ text: sub.join("   "), kind: "sub" });
 
-    if (f.destination && ac.destination && routePlausible(ac)) {
+    if (f.destination && ac.destination && routePlausible(ac, cfg)) {
       const head = ac.origin ? `${ac.origin} → ${ac.destination}` : `→ ${ac.destination}`;
       out.push({ text: ac.destName ? `${head}   ${ac.destName}` : head, kind: "sub" });
       if (cfg.showRouteDetail && ac.destLat != null && ac.destLon != null) {
@@ -927,7 +927,7 @@ export class Renderer {
       ac.typeName ?? ac.typeCode,
       ac.onGround ? "on ground" : dpAlt != null ? `${dpAlt.toLocaleString("en-US")} ft` : null,
       ac.gs != null ? `${Math.round(ac.gs)} kt` : null,
-      ac.origin && ac.destination && routePlausible(ac) ? `${ac.origin} → ${ac.destination}` : null,
+      ac.origin && ac.destination && routePlausible(ac, cfg) ? `${ac.origin} → ${ac.destination}` : null,
     ].filter(Boolean);
     ctx.fillText(bits.join("    ·    "), x, y + 26);
     try {
@@ -997,20 +997,46 @@ function crossTrackMiles(
 }
 
 /**
- * Is the adsbdb route geographically consistent with where the plane actually
- * is? adsbdb returns the scheduled route for a callsign, which is sometimes the
- * wrong leg (e.g. FAR→DEN for a plane over SFO). Accept the route only if the
- * plane is near an endpoint or roughly on the path.
+ * Is the adsbdb route consistent with where the plane actually is and what it's
+ * doing? adsbdb returns the scheduled route for a callsign, which is sometimes
+ * the wrong leg. We reject a route if:
+ *  (a) it's geographically impossible — the plane is neither near an endpoint
+ *      nor roughly on the great-circle path; or
+ *  (b) the plane's vertical trend disagrees — a climbing plane near you just
+ *      departed the local airport (so that should be the origin); a descending
+ *      one is arriving (the destination).
  */
-function routePlausible(ac: Aircraft): boolean {
+function routePlausible(ac: Aircraft, cfg: Config): boolean {
   if (ac.lat == null || ac.lon == null) return true;
   const haveCoords = ac.originLat != null || ac.destLat != null;
   if (!haveCoords) return true; // legacy cache without coords — don't hide
-  const near = (la?: number, lo?: number) =>
+
+  // (a) geographic consistency
+  const nearPlane = (la?: number, lo?: number) =>
     la != null && lo != null && greatCircleMiles(ac.lat!, ac.lon!, la, lo) < 80;
-  if (near(ac.originLat, ac.originLon) || near(ac.destLat, ac.destLon)) return true;
-  if (ac.originLat != null && ac.originLon != null && ac.destLat != null && ac.destLon != null) {
-    return Math.abs(crossTrackMiles(ac.lat, ac.lon, ac.originLat, ac.originLon, ac.destLat, ac.destLon)) < 130;
+  let geomOk = nearPlane(ac.originLat, ac.originLon) || nearPlane(ac.destLat, ac.destLon);
+  if (
+    !geomOk &&
+    ac.originLat != null && ac.originLon != null &&
+    ac.destLat != null && ac.destLon != null
+  ) {
+    geomOk = Math.abs(crossTrackMiles(ac.lat, ac.lon, ac.originLat, ac.originLon, ac.destLat, ac.destLon)) < 130;
+  } else if (!geomOk && (ac.originLat == null || ac.destLat == null)) {
+    geomOk = true; // only one endpoint known and not near — can't judge, allow
+  }
+  if (!geomOk) return false;
+
+  // (b) vertical-trend consistency for low, nearby traffic
+  const alt = ac.altBaro ?? ac.altGeom;
+  const localTraffic = greatCircleMiles(ac.lat, ac.lon, cfg.centerLat, cfg.centerLon) < 30;
+  const localAirport = (la?: number, lo?: number) =>
+    la != null && lo != null && greatCircleMiles(cfg.centerLat, cfg.centerLon, la, lo) < 45;
+  if (localTraffic && alt != null && alt < 12000 && ac.baroRate != null && Math.abs(ac.baroRate) > 250) {
+    if (ac.baroRate > 0) {
+      if (ac.originLat != null && !localAirport(ac.originLat, ac.originLon)) return false; // departing
+    } else {
+      if (ac.destLat != null && !localAirport(ac.destLat, ac.destLon)) return false; // arriving
+    }
   }
   return true;
 }
