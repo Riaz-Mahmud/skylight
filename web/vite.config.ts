@@ -26,6 +26,7 @@ export default defineConfig({
         index: resolve(__dirname, "index.html"),
         control: resolve(__dirname, "control.html"),
         setup: resolve(__dirname, "setup.html"),
+        diagnostics: resolve(__dirname, "diagnostics.html"),
       },
     },
   },

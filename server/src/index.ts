@@ -110,6 +110,7 @@ async function main(): Promise<void> {
     app.use(express.static(WEB_DIST));
     app.get("/setup", (_req, res) => res.redirect(302, "/setup.html"));
     app.get("/control", (_req, res) => res.redirect(302, "/control.html"));
+    app.get("/diagnostics", (_req, res) => res.redirect(302, "/diagnostics.html"));
     app.get("/", (_req, res) => res.redirect(302, "/index.html"));
   } else {
     app.get("/", (_req, res) =>

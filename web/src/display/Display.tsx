@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Config, Theme } from "@shared/index.js";
 import { DEFAULT_CONFIG } from "@shared/index.js";
 import { useStream } from "../lib/useStream.js";
@@ -10,6 +10,7 @@ export function Display() {
   const { state, conn } = useStream("display");
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<Renderer | null>(null);
+  const [rendererStats, setRendererStats] = useState({ total: 0, estimated: 0, stale: 0 });
 
   // Keep the latest config in a ref so the RAF loop always reads fresh values.
   const configRef = useRef<Config>(state.config ?? DEFAULT_CONFIG);
@@ -23,8 +24,13 @@ export function Display() {
     r.start();
     const onResize = () => r.resize();
     window.addEventListener("resize", onResize);
+    // Poll renderer stats for HUD display every 2s.
+    const statsInterval = setInterval(() => {
+      setRendererStats(r.getStats());
+    }, 2000);
     return () => {
       window.removeEventListener("resize", onResize);
+      clearInterval(statsInterval);
       r.stop();
       rendererRef.current = null;
     };
@@ -83,6 +89,8 @@ export function Display() {
             {state.status?.source ?? "—"} · {state.aircraft.length} ac ·{" "}
             rot {cfg.rotationDeg}° · mirror {cfg.mirrorX ? "X" : "–"}
             {cfg.mirrorY ? "Y" : ""} · r {cfg.radiusMiles}mi · {cfg.theme}
+            {rendererStats.estimated > 0 && ` · ${rendererStats.estimated} est`}
+            {rendererStats.stale > 0 && ` · ${rendererStats.stale} stale`}
           </span>
         </div>
       )}

@@ -68,6 +68,17 @@ export interface Config {
    *  refresh rate). Lower this to cut GPU/CPU load (and laptop fan noise). */
   maxFps: number;
 
+  // --- anti-flicker aircraft memory ---
+  /** Keep aircraft visible for this many seconds after the last update, even
+   *  if the source temporarily stops reporting them. 0 = disabled (old behaviour). */
+  aircraftMemorySec: number;
+  /** After aircraftMemorySec, fade out over this many additional seconds. */
+  fadeOutSec: number;
+  /** Remove the track completely this many seconds after the last update. */
+  hideOnlyAfterSec: number;
+  /** Show a visual indicator on estimated/stale tracks. */
+  showStaleIndicator: boolean;
+
   // --- visuals ---
   theme: Theme;
   palette: Palette;
@@ -127,10 +138,15 @@ export const DEFAULT_CONFIG: Config = {
   hideOnGround: true,
 
   interpolate: true,
-  maxExtrapolationSec: 5,
-  staleSec: 20,
+  maxExtrapolationSec: 60,
+  staleSec: 120,
   smoothing: 0.18,
   maxFps: 0,
+
+  aircraftMemorySec: 120,
+  fadeOutSec: 30,
+  hideOnlyAfterSec: 180,
+  showStaleIndicator: true,
 
   theme: "ambient",
   palette: {

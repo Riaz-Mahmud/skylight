@@ -46,6 +46,10 @@ interface Track {
   hasPos: boolean;
   /** Smoothed appearance alpha (fade in on spawn, out when stale). */
   life: number;
+  /** True when the aircraft is no longer in the live feed but still in memory. */
+  estimated: boolean;
+  /** Number of consecutive update cycles where this aircraft was absent. */
+  missingCycles: number;
 }
 
 type ProjOpts = Parameters<typeof project>[1];
@@ -89,6 +93,8 @@ interface Visible {
   alpha: number;
   color: [number, number, number];
   emergency: boolean;
+  /** Whether this track is kept by the memory system (not in current feed). */
+  estimated: boolean;
 }
 
 export class Renderer {
@@ -159,6 +165,20 @@ export class Renderer {
     cancelAnimationFrame(this.raf);
   }
 
+  /** Live stats for the HUD and diagnostics page. */
+  getStats(): { total: number; estimated: number; stale: number } {
+    const cfg = this.getConfig();
+    let estimated = 0;
+    let stale = 0;
+    const now = performance.now();
+    for (const tr of this.tracks.values()) {
+      const ageSec = (now - tr.lastSeen) / 1000;
+      if (tr.estimated) estimated++;
+      if (ageSec > cfg.staleSec) stale++;
+    }
+    return { total: this.tracks.size, estimated, stale };
+  }
+
   resize(): void {
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
     this.w = this.canvas.clientWidth;
@@ -172,25 +192,40 @@ export class Renderer {
   update(aircraft: Aircraft[]): void {
     const cfg = this.getConfig();
     const now = performance.now();
+    const seenHexes = new Set<string>();
+
     for (const ac of aircraft) {
       if (!this.passesFilter(ac, cfg)) continue;
+      seenHexes.add(ac.hex);
       const hasPos = ac.lat != null && ac.lon != null;
       const m = hasPos
         ? llToMeters(ac.lat!, ac.lon!, cfg.centerLat, cfg.centerLon)
         : { east: 0, north: 0 };
       let tr = this.tracks.get(ac.hex);
       if (!tr) {
-        tr = { ac, history: [], firstSeen: now, lastSeen: now, hasPos, life: 0 };
+        tr = { ac, history: [], firstSeen: now, lastSeen: now, hasPos, life: 0, estimated: false, missingCycles: 0 };
         this.tracks.set(ac.hex, tr);
       }
       tr.ac = ac;
       tr.lastSeen = now;
       tr.hasPos = hasPos;
+      tr.estimated = false;
+      tr.missingCycles = 0;
       if (hasPos) {
         const last = tr.history[tr.history.length - 1];
         // Dedup identical fixes (source sometimes repeats a position).
         if (!last || last.m.east !== m.east || last.m.north !== m.north) {
           tr.history.push({ t: now, m, track: ac.track, gs: ac.gs });
+        }
+      }
+    }
+
+    // Mark aircraft absent from this snapshot as estimated (if memory is enabled).
+    if (cfg.aircraftMemorySec > 0) {
+      for (const [, tr] of this.tracks) {
+        if (!seenHexes.has(tr.ac.hex)) {
+          tr.estimated = true;
+          tr.missingCycles++;
         }
       }
     }
@@ -267,16 +302,44 @@ export class Renderer {
 
     for (const [hex, tr] of this.tracks) {
       const stale = (now - tr.lastSeen) / 1000;
-      if (stale > cfg.staleSec) {
-        this.tracks.delete(hex);
-        continue;
+
+      // --- Anti-flicker aircraft memory ---
+      // If memory is enabled, keep tracks alive past staleSec, fading them out
+      // gracefully instead of blinking them off.
+      const memSec = cfg.aircraftMemorySec ?? 0;
+      if (memSec > 0) {
+        if (stale > cfg.hideOnlyAfterSec) {
+          this.tracks.delete(hex);
+          continue;
+        }
+      } else {
+        // Legacy behaviour: drop after staleSec.
+        if (stale > cfg.staleSec) {
+          this.tracks.delete(hex);
+          continue;
+        }
       }
+
       // Trim history to the trail window (+ a little headroom for interp).
       const keep = Math.max(cfg.trailSeconds, 6) * 1000 + 4000;
       while (tr.history.length > 2 && now - tr.history[0].t > keep) tr.history.shift();
 
-      // Fade in on spawn, fade out as it goes stale.
-      const target = stale > cfg.staleSec * 0.5 ? 0 : 1;
+      // Fade in on spawn; fade out as it goes stale.
+      let target: number;
+      if (memSec > 0) {
+        if (stale < cfg.staleSec * 0.5) {
+          target = 1;
+        } else if (stale < memSec) {
+          // Gently dim estimated tracks (still clearly visible).
+          target = 0.65;
+        } else {
+          // Past memory window: fade out over fadeOutSec.
+          const fadeProgress = Math.min(1, (stale - memSec) / Math.max(1, cfg.fadeOutSec));
+          target = (1 - fadeProgress) * 0.65;
+        }
+      } else {
+        target = stale > cfg.staleSec * 0.5 ? 0 : 1;
+      }
       tr.life += (target - tr.life) * Math.min(1, frameDt * 3.5);
 
       if (!tr.hasPos) continue;
@@ -294,7 +357,7 @@ export class Renderer {
       const color = cfg.altitudeColor ? altRamp(alt) : hexToRgb(cfg.palette.glyph);
       const emergency = cfg.highlightEmergency && !!tr.ac.squawk && EMERGENCY_SQUAWKS.has(tr.ac.squawk);
 
-      visible.push({ tr, m, p, heading, rangeMi, alpha, color, emergency });
+      visible.push({ tr, m, p, heading, rangeMi, alpha, color, emergency, estimated: tr.estimated });
     }
 
     // Nearest last so it paints on top.
@@ -310,6 +373,14 @@ export class Renderer {
     this.drawLabels(cfg, byNear);
 
     if (cfg.theme === "focus" && byNear.length) this.drawDetailPanel(cfg, byNear[0]);
+
+    // Stale/estimated indicator (when showStaleIndicator is enabled).
+    if (cfg.showStaleIndicator && cfg.aircraftMemorySec > 0) {
+      const estimatedVisible = visible.filter((v) => v.tr.estimated);
+      if (estimatedVisible.length > 0) {
+        this.drawStaleIndicator(cfg, estimatedVisible.length);
+      }
+    }
   }
 
   /**
@@ -410,7 +481,16 @@ export class Renderer {
   private drawAirport(cfg: Config, proj: ProjOpts): void {
     const ctx = this.ctx;
     const rwyRgb: [number, number, number] = [150, 180, 220];
-    for (const ap of AIRPORTS) {
+
+    // Only draw airports whose reference point falls within the display radius
+    // (with a generous 2× buffer so runways that extend to the edge still show).
+    const cutoffMi = cfg.radiusMiles * 2;
+    const nearAirports = AIRPORTS.filter((ap) => {
+      const m = llToMeters(ap.lat, ap.lon, cfg.centerLat, cfg.centerLon);
+      return metersToMiles(rangeMeters(m)) <= cutoffMi;
+    });
+
+    for (const ap of nearAirports) {
       let cx = 0;
       let cy = 0;
       let n = 0;
@@ -911,8 +991,22 @@ export class Renderer {
     });
   }
 
-  private drawDetailPanel(cfg: Config, v: Visible): void {
-    const ac = v.tr.ac;
+  private drawStaleIndicator(cfg: Config, count: number): void {
+    const ctx = this.ctx;
+    const x = this.w - 14;
+    const y = this.h - 14;
+    ctx.save();
+    ctx.textAlign = "right";
+    ctx.textBaseline = "bottom";
+    ctx.font = `400 11px ${cfg.fonts.mono}`;
+    ctx.fillStyle = `rgba(200,180,100,${0.55 * cfg.brightness})`;
+    ctx.shadowColor = "rgba(0,0,0,0.8)";
+    ctx.shadowBlur = 4;
+    ctx.fillText(`Estimated position · ${count} track${count !== 1 ? "s" : ""}`, x, y);
+    ctx.restore();
+  }
+
+  private drawDetailPanel(cfg: Config, v: Visible): void {    const ac = v.tr.ac;
     const x = 40;
     const y = this.h - 120;
     this.withLabelRotation(cfg, x, y, () => this.drawDetailPanelText(cfg, v, ac, x, y));
