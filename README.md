@@ -94,9 +94,10 @@ DATA_SOURCE=api pnpm dev
 
 - **Display:** http://localhost:5173/
 - **Control panel:** http://localhost:5173/control.html (or from your phone: `http://<your-ip>:5173/control.html`)
+- **Setup wizard:** http://localhost:5173/setup.html
 
-Set your location in the control panel area is coming; for now set `centerLat` /
-`centerLon` in [`shared/src/config.ts`](shared/src/config.ts) (defaults to SFO).
+On first run, open the setup wizard to search/pick your location and save
+`centerLat` / `centerLon` / `radiusMiles`.
 
 ### With a radio (locally)
 
@@ -132,8 +133,9 @@ fields:
 | `skyTimeOffsetMin` | Scrub the sky clock for testing (0 = live). |
 | `showDestArc` / `showRouteDetail` | "Window to elsewhere". |
 
-**Using it somewhere other than SFO:** set `centerLat`/`centerLon`, and replace the
-runway geometry in [`web/src/display/airports.ts`](web/src/display/airports.ts) with your
+**Using it somewhere other than SFO:** run the setup wizard (`/setup` in production,
+`/setup.html` in local Vite dev) to save your location, then replace the runway
+geometry in [`web/src/display/airports.ts`](web/src/display/airports.ts) with your
 local airport (coordinates from [OurAirports](https://ourairports.com/data/)). Stars,
 sun, moon, and satellites are computed for your coordinates automatically.
 

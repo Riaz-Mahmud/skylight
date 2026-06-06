@@ -72,6 +72,27 @@ async function main(): Promise<void> {
   app.get("/api/config", (_req, res) => res.json(store.get()));
   app.post("/api/config", (req, res) => res.json(store.patch(req.body)));
   app.post("/api/config/reset", (_req, res) => res.json(store.reset()));
+  app.get("/api/setup/status", (_req, res) =>
+    res.json({ hasSavedConfig: store.hasSavedConfig() }),
+  );
+  app.post("/api/setup/location", (req, res) => {
+    const centerLat = Number(req.body?.centerLat);
+    const centerLon = Number(req.body?.centerLon);
+    const radiusMiles = Number(req.body?.radiusMiles);
+
+    if (!Number.isFinite(centerLat) || centerLat < -90 || centerLat > 90) {
+      return res.status(400).json({ error: "centerLat must be in range [-90, 90]" });
+    }
+    if (!Number.isFinite(centerLon) || centerLon < -180 || centerLon > 180) {
+      return res.status(400).json({ error: "centerLon must be in range [-180, 180]" });
+    }
+    if (!Number.isFinite(radiusMiles) || radiusMiles <= 0 || radiusMiles > 200) {
+      return res.status(400).json({ error: "radiusMiles must be in range (0, 200]" });
+    }
+
+    const config = store.patch({ centerLat, centerLon, radiusMiles });
+    return res.json({ config, hasSavedConfig: store.hasSavedConfig() });
+  });
   app.get("/api/aircraft", (_req, res) => res.json(poller.getSnapshot()));
   app.get("/api/status", (_req, res) => res.json(poller.getStatus()));
   app.get("/api/tle", async (_req, res) => res.json(await tleStore.get()));
@@ -87,8 +108,9 @@ async function main(): Promise<void> {
   // --- static web (production build) ---
   if (existsSync(WEB_DIST)) {
     app.use(express.static(WEB_DIST));
-    app.get("/control", (_req, res) => res.sendFile(resolve(WEB_DIST, "control.html")));
-    app.get("/", (_req, res) => res.sendFile(resolve(WEB_DIST, "index.html")));
+    app.get("/setup", (_req, res) => res.redirect(302, "/setup.html"));
+    app.get("/control", (_req, res) => res.redirect(302, "/control.html"));
+    app.get("/", (_req, res) => res.redirect(302, "/index.html"));
   } else {
     app.get("/", (_req, res) =>
       res

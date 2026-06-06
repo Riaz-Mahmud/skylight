@@ -1,0 +1,157 @@
+:root {
+  color-scheme: dark;
+  --bg: #0a0c10;
+  --panel: #14181f;
+  --line: #232a35;
+  --text: #e8e8ea;
+  --muted: #8b93a1;
+  --accent: #9b7ecf;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Inter, system-ui, sans-serif;
+}
+
+.setup-root {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 20px 14px 40px;
+}
+
+.setup-header h1 {
+  margin: 0;
+}
+
+.setup-header p {
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+
+.setup-card {
+  margin-top: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 14px;
+}
+
+.setup-search {
+  display: flex;
+  gap: 8px;
+}
+
+.setup-search input,
+.field-grid input {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: #0d1117;
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.setup-search button,
+.setup-actions button,
+.search-results button,
+.preset-row button {
+  border: 1px solid var(--line);
+  background: #1b212b;
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.search-results {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0;
+  display: grid;
+  gap: 6px;
+}
+
+.search-results button {
+  width: 100%;
+  text-align: left;
+}
+
+.preset-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.preset-row button {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: flex-start;
+}
+
+.preset-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.map-wrap {
+  margin-top: 12px;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+
+.map-wrap .leaflet-container {
+  height: 340px;
+}
+
+.field-grid {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.field-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.field-grid strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.setup-error {
+  color: #ff6f61;
+  margin: 12px 0 0;
+}
+
+.setup-actions {
+  margin-top: 14px;
+  display: flex;
+  gap: 8px;
+}
+
+.setup-actions .primary {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+@media (max-width: 720px) {
+  .field-grid,
+  .preset-row {
+    grid-template-columns: 1fr;
+  }
+}
