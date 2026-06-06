@@ -111,8 +111,8 @@ export interface Config {
 }
 
 export const DEFAULT_CONFIG: Config = {
-  // Default center: San Francisco International (SFO). Set this to your own
-  // location — ideally where you'll be looking up at the ceiling.
+  // Fallback center: San Francisco International (SFO). The setup wizard should
+  // normally persist a user-selected location on first run.
   centerLat: 37.6213,
   centerLon: -122.379,
   radiusMiles: 3,

@@ -31,6 +31,22 @@ export function Control() {
   const { state, conn } = useStream("control");
   const cfg = state.config;
 
+  useEffect(() => {
+    let active = true;
+    fetch("/api/setup/status")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((status) => {
+        if (!active) return;
+        if (status && status.hasSavedConfig === false) {
+          location.assign("/setup");
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
   // ISS pass finder (for the Sky section).
   const [tles, setTles] = useState<Tle[]>([]);
   useEffect(() => {
@@ -267,6 +283,9 @@ export function Control() {
         </Section>
 
         <Section title="System">
+          <button className="reset" onClick={() => location.assign("/setup")}>
+            Run location setup wizard
+          </button>
           <button className="reset" onClick={() => conn.resetConfig()}>
             Reset all to defaults
           </button>

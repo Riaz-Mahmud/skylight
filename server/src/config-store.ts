@@ -9,6 +9,7 @@ type Listener = (config: Config) => void;
 
 export class ConfigStore {
   private config: Config = DEFAULT_CONFIG;
+  private hasSavedFile = false;
   private listeners = new Set<Listener>();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -18,13 +19,19 @@ export class ConfigStore {
     try {
       const raw = await readFile(this.path, "utf8");
       this.config = mergeConfig(DEFAULT_CONFIG, JSON.parse(raw) as Partial<Config>);
+      this.hasSavedFile = true;
     } catch {
       this.config = DEFAULT_CONFIG; // first run
+      this.hasSavedFile = false;
     }
   }
 
   get(): Config {
     return this.config;
+  }
+
+  hasSavedConfig(): boolean {
+    return this.hasSavedFile;
   }
 
   patch(patch: Partial<Config>): Config {
@@ -66,6 +73,7 @@ export class ConfigStore {
     try {
       await mkdir(dirname(this.path), { recursive: true });
       await writeFile(this.path, JSON.stringify(this.config, null, 2), "utf8");
+      this.hasSavedFile = true;
     } catch (err) {
       console.error("[config] save failed:", err);
     }
