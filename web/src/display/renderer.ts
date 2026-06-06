@@ -23,10 +23,11 @@ import {
   type Meters,
   type Point,
 } from "@shared/index.js";
-import { AIRPORTS } from "./airports.js";
+import { AIRPORTS, getAirportRevision, type Airport, type AirportArea } from "./airports.js";
 import { classifyGlyph, drawAircraftGlyph, GLYPH_SCALE } from "./aircraftGlyph.js";
 import { computeSky, type Sky, type Tle } from "./celestial.js";
 import { ASTERISMS } from "./stars.js";
+import { CITIES } from "./cities.js";
 
 /** How far in the past we render, ms. Just over the ~1 Hz fix interval. */
 const RENDER_DELAY_MS = 1150;
@@ -38,9 +39,50 @@ interface Sample {
   gs?: number;
 }
 
+class CircularBuffer<T> implements Iterable<T> {
+  private values: (T | undefined)[];
+  private head = 0;
+  private count = 0;
+
+  constructor(private capacity: number) {
+    this.values = new Array(capacity);
+  }
+
+  get length(): number {
+    return this.count;
+  }
+
+  push(value: T): void {
+    const index = (this.head + this.count) % this.capacity;
+    this.values[index] = value;
+    if (this.count < this.capacity) this.count++;
+    else this.head = (this.head + 1) % this.capacity;
+  }
+
+  at(index: number): T {
+    const value = this.values[(this.head + index) % this.capacity];
+    if (value === undefined) throw new RangeError("circular buffer index out of range");
+    return value;
+  }
+
+  last(): T | undefined {
+    return this.count ? this.at(this.count - 1) : undefined;
+  }
+
+  drop(count: number): void {
+    const removed = Math.min(count, this.count);
+    this.head = (this.head + removed) % this.capacity;
+    this.count -= removed;
+  }
+
+  *[Symbol.iterator](): Iterator<T> {
+    for (let i = 0; i < this.count; i++) yield this.at(i);
+  }
+}
+
 interface Track {
   ac: Aircraft;
-  history: Sample[];
+  history: CircularBuffer<Sample>;
   firstSeen: number;
   lastSeen: number;
   hasPos: boolean;
@@ -50,6 +92,7 @@ interface Track {
   estimated: boolean;
   /** Number of consecutive update cycles where this aircraft was absent. */
   missingCycles: number;
+  renderedM?: Meters;
 }
 
 type ProjOpts = Parameters<typeof project>[1];
@@ -93,8 +136,16 @@ interface Visible {
   alpha: number;
   color: [number, number, number];
   emergency: boolean;
+  followed: boolean;
   /** Whether this track is kept by the memory system (not in current feed). */
   estimated: boolean;
+}
+
+export interface AircraftHit {
+  aircraft: Aircraft;
+  x: number;
+  y: number;
+  followed: boolean;
 }
 
 export class Renderer {
@@ -116,6 +167,12 @@ export class Renderer {
   private sky: Sky = { stars: [], sats: [] };
   private skyComputedAt = 0;
   private skyOffsetUsed = NaN;
+  private nearbyAirports: Airport[] = [];
+  private nearbyAirportsKey = "";
+  private followOffset: Meters = { east: 0, north: 0 };
+  private followVelocity: Meters = { east: 0, north: 0 };
+  private activeFollowHex = "";
+  private visibleHits: AircraftHit[] = [];
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -179,6 +236,26 @@ export class Renderer {
     return { total: this.tracks.size, estimated, stale };
   }
 
+  hitTest(clientX: number, clientY: number): AircraftHit | null {
+    const rect = this.canvas.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    let best: AircraftHit | null = null;
+    let bestDistance = 32;
+    for (const hit of this.visibleHits) {
+      const distance = Math.hypot(hit.x - x, hit.y - y);
+      if (distance < bestDistance) {
+        best = hit;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
+  getAircraftHit(hex: string): AircraftHit | null {
+    return this.visibleHits.find((hit) => hit.aircraft.hex.toLowerCase() === hex.toLowerCase()) ?? null;
+  }
+
   resize(): void {
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
     this.w = this.canvas.clientWidth;
@@ -196,15 +273,25 @@ export class Renderer {
 
     for (const ac of aircraft) {
       if (!this.passesFilter(ac, cfg)) continue;
-      seenHexes.add(ac.hex);
+      const hex = ac.hex.toLowerCase();
+      seenHexes.add(hex);
       const hasPos = ac.lat != null && ac.lon != null;
       const m = hasPos
         ? llToMeters(ac.lat!, ac.lon!, cfg.centerLat, cfg.centerLon)
         : { east: 0, north: 0 };
-      let tr = this.tracks.get(ac.hex);
+      let tr = this.tracks.get(hex);
       if (!tr) {
-        tr = { ac, history: [], firstSeen: now, lastSeen: now, hasPos, life: 0, estimated: false, missingCycles: 0 };
-        this.tracks.set(ac.hex, tr);
+        tr = {
+          ac,
+          history: new CircularBuffer<Sample>(4096),
+          firstSeen: now,
+          lastSeen: now,
+          hasPos,
+          life: 0,
+          estimated: false,
+          missingCycles: 0,
+        };
+        this.tracks.set(hex, tr);
       }
       tr.ac = ac;
       tr.lastSeen = now;
@@ -212,10 +299,14 @@ export class Renderer {
       tr.estimated = false;
       tr.missingCycles = 0;
       if (hasPos) {
-        const last = tr.history[tr.history.length - 1];
+        const last = tr.history.last();
         // Dedup identical fixes (source sometimes repeats a position).
         if (!last || last.m.east !== m.east || last.m.north !== m.north) {
           tr.history.push({ t: now, m, track: ac.track, gs: ac.gs });
+          const keep = Math.max(cfg.trailSeconds, 6) * 1000 + 4000;
+          let trim = 0;
+          while (trim < tr.history.length - 2 && now - tr.history.at(trim).t > keep) trim++;
+          tr.history.drop(trim);
         }
       }
     }
@@ -223,7 +314,7 @@ export class Renderer {
     // Mark aircraft absent from this snapshot as estimated (if memory is enabled).
     if (cfg.aircraftMemorySec > 0) {
       for (const [, tr] of this.tracks) {
-        if (!seenHexes.has(tr.ac.hex)) {
+        if (!seenHexes.has(tr.ac.hex.toLowerCase())) {
           tr.estimated = true;
           tr.missingCycles++;
         }
@@ -245,8 +336,8 @@ export class Renderer {
   private sampleAt(tr: Track, tt: number, cfg: Config): Meters | null {
     const h = tr.history;
     if (h.length === 0) return null;
-    if (tt <= h[0].t) return h[0].m;
-    const lastS = h[h.length - 1];
+    if (tt <= h.at(0).t) return h.at(0).m;
+    const lastS = h.at(h.length - 1);
     if (tt >= lastS.t) {
       // Beyond newest fix — extrapolate gently, capped.
       const dt = Math.min((tt - lastS.t) / 1000, cfg.maxExtrapolationSec);
@@ -254,9 +345,9 @@ export class Renderer {
     }
     // Find the bracketing pair.
     for (let i = h.length - 1; i > 0; i--) {
-      if (h[i - 1].t <= tt && tt <= h[i].t) {
-        const a = h[i - 1];
-        const b = h[i];
+      if (h.at(i - 1).t <= tt && tt <= h.at(i).t) {
+        const a = h.at(i - 1);
+        const b = h.at(i);
         const f = (tt - a.t) / Math.max(1, b.t - a.t);
         return {
           east: a.m.east + (b.m.east - a.m.east) * f,
@@ -292,12 +383,31 @@ export class Renderer {
       screenH: this.h,
     };
 
+    const tt = now - RENDER_DELAY_MS;
+    const motionFactor = cfg.smoothing <= 0
+      ? 1
+      : 1 - Math.pow(cfg.smoothing, Math.max(0.01, frameDt * 60));
+    const followHex = cfg.followFlightHex.toLowerCase();
+    const followed = followHex
+      ? this.tracks.get(followHex)
+      : undefined;
+    const followedPosition = followed ? this.sampleAt(followed, tt, cfg) : null;
+    if (followed && followedPosition) {
+      followed.renderedM ??= followedPosition;
+      followed.renderedM = {
+        east: followed.renderedM.east + (followedPosition.east - followed.renderedM.east) * motionFactor,
+        north: followed.renderedM.north + (followedPosition.north - followed.renderedM.north) * motionFactor,
+      };
+    }
+    this.updateFollowCamera(followHex, followed?.renderedM, frameDt);
+
     this.updateSky(cfg, now);
     this.drawSky(cfg, proj);
+    if (followHex && cfg.showFollowContext) this.drawFollowContext(cfg, proj);
     this.drawOverlays(cfg, proj);
     if (cfg.showAirport) this.drawAirport(cfg, proj);
+    if (followHex && cfg.showFollowContext) this.drawFollowPlaceLabels(cfg, proj);
 
-    const tt = now - RENDER_DELAY_MS;
     const visible: Visible[] = [];
 
     for (const [hex, tr] of this.tracks) {
@@ -320,10 +430,6 @@ export class Renderer {
         }
       }
 
-      // Trim history to the trail window (+ a little headroom for interp).
-      const keep = Math.max(cfg.trailSeconds, 6) * 1000 + 4000;
-      while (tr.history.length > 2 && now - tr.history[0].t > keep) tr.history.shift();
-
       // Fade in on spawn; fade out as it goes stale.
       let target: number;
       if (memSec > 0) {
@@ -343,13 +449,22 @@ export class Renderer {
       tr.life += (target - tr.life) * Math.min(1, frameDt * 3.5);
 
       if (!tr.hasPos) continue;
-      const m = this.sampleAt(tr, tt, cfg);
-      if (!m) continue;
+      const sampled = this.sampleAt(tr, tt, cfg);
+      if (!sampled) continue;
+      if (!tr.renderedM) tr.renderedM = sampled;
+      if (tr !== followed) {
+        tr.renderedM = {
+          east: tr.renderedM.east + (sampled.east - tr.renderedM.east) * motionFactor,
+          north: tr.renderedM.north + (sampled.north - tr.renderedM.north) * motionFactor,
+        };
+      }
+      const m = tr.renderedM;
 
-      const rangeMi = metersToMiles(rangeMeters(m));
+      const relativeM = this.relativeToFollow(m);
+      const rangeMi = metersToMiles(rangeMeters(relativeM));
       if (rangeMi > cfg.radiusMiles * 1.08) continue;
 
-      const p = project(m, proj);
+      const p = project(relativeM, proj);
       const heading = this.screenHeading(tr, tt, proj);
       const edgeFade = clamp01((cfg.radiusMiles - rangeMi) / (cfg.radiusMiles * 0.14));
       const alpha = clamp01(edgeFade) * tr.life * cfg.brightness;
@@ -357,11 +472,28 @@ export class Renderer {
       const color = cfg.altitudeColor ? altRamp(alt) : hexToRgb(cfg.palette.glyph);
       const emergency = cfg.highlightEmergency && !!tr.ac.squawk && EMERGENCY_SQUAWKS.has(tr.ac.squawk);
 
-      visible.push({ tr, m, p, heading, rangeMi, alpha, color, emergency, estimated: tr.estimated });
+      visible.push({
+        tr,
+        m: relativeM,
+        p,
+        heading,
+        rangeMi,
+        alpha,
+        color,
+        emergency,
+        followed: tr === followed,
+        estimated: tr.estimated,
+      });
     }
 
     // Nearest last so it paints on top.
     visible.sort((a, b) => b.rangeMi - a.rangeMi);
+    this.visibleHits = visible.map((v) => ({
+      aircraft: v.tr.ac,
+      x: v.p.x,
+      y: v.p.y,
+      followed: v.followed,
+    }));
 
     // Trails + glyphs for everyone.
     if (cfg.showDestArc) for (const v of visible) this.drawDestArc(cfg, proj, v);
@@ -484,13 +616,34 @@ export class Renderer {
 
     // Only draw airports whose reference point falls within the display radius
     // (with a generous 2× buffer so runways that extend to the edge still show).
-    const cutoffMi = cfg.radiusMiles * 2;
-    const nearAirports = AIRPORTS.filter((ap) => {
-      const m = llToMeters(ap.lat, ap.lon, cfg.centerLat, cfg.centerLon);
-      return metersToMiles(rangeMeters(m)) <= cutoffMi;
-    });
+    const followEast = Math.round(this.followOffset.east / 1000);
+    const followNorth = Math.round(this.followOffset.north / 1000);
+    const airportKey = `${cfg.centerLat}:${cfg.centerLon}:${cfg.radiusMiles}:${followEast}:${followNorth}:${getAirportRevision()}`;
+    if (airportKey !== this.nearbyAirportsKey) {
+      const cutoffMi = cfg.radiusMiles * 2;
+      this.nearbyAirports = AIRPORTS.filter((ap) => {
+        const m = this.relativeToFollow(llToMeters(ap.lat, ap.lon, cfg.centerLat, cfg.centerLon));
+        return metersToMiles(rangeMeters(m)) <= cutoffMi;
+      });
+      this.nearbyAirportsKey = airportKey;
+    }
 
-    for (const ap of nearAirports) {
+    for (const ap of this.nearbyAirports) {
+      this.drawAirportAreas(ap.aprons, cfg, proj, rwyRgb, 0.07);
+      this.drawAirportAreas(ap.terminals, cfg, proj, rwyRgb, 0.13);
+      for (const taxiway of ap.taxiways ?? []) {
+        const points = taxiway.points.map((point) => this.toScreen(point, cfg, proj));
+        if (points.length < 2) continue;
+        ctx.save();
+        ctx.strokeStyle = rgba(rwyRgb, 0.1 * cfg.brightness);
+        ctx.lineWidth = Math.max(1, taxiway.widthFt * 0.3048 * proj.pxPerM);
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(points[0].x, points[0].y);
+        for (const point of points.slice(1)) ctx.lineTo(point.x, point.y);
+        ctx.stroke();
+        ctx.restore();
+      }
       let cx = 0;
       let cy = 0;
       let n = 0;
@@ -519,6 +672,11 @@ export class Renderer {
         ctx.stroke();
         ctx.restore();
 
+        if (Math.hypot(b.x - a.x, b.y - a.y) > 75) {
+          this.drawRunwayIdent(r.leIdent, a, b, cfg, rwyRgb);
+          this.drawRunwayIdent(r.heIdent, b, a, cfg, rwyRgb);
+        }
+
         cx += (a.x + b.x) / 2;
         cy += (a.y + b.y) / 2;
         n++;
@@ -537,7 +695,17 @@ export class Renderer {
         } catch {
           /* noop */
         }
-        ctx.fillText(ap.name, cx, cy);
+        ctx.fillText(`${ap.name}  ${ap.icao}`, cx, cy);
+        if (ap.fullName) {
+          ctx.font = `300 8px ${cfg.fonts.label}`;
+          ctx.fillStyle = rgba(rwyRgb, 0.3 * cfg.brightness);
+          try {
+            ctx.letterSpacing = "1px";
+          } catch {
+            /* noop */
+          }
+          ctx.fillText(ap.fullName, cx, cy + 14);
+        }
         try {
           ctx.letterSpacing = "0px";
         } catch {
@@ -548,8 +716,232 @@ export class Renderer {
     }
   }
 
+  private drawFollowContext(cfg: Config, proj: ProjOpts): void {
+    const ctx = this.ctx;
+    const radiusM = cfg.radiusMiles * 1609.344;
+    const gridM = Math.max(1609.344, Math.pow(2, Math.round(Math.log2(radiusM / 4))));
+    const startEast = Math.floor((this.followOffset.east - radiusM) / gridM) * gridM;
+    const startNorth = Math.floor((this.followOffset.north - radiusM) / gridM) * gridM;
+
+    ctx.save();
+    ctx.strokeStyle = rgba(hexToRgb(cfg.palette.grid), 0.12 * cfg.brightness);
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 8]);
+    for (let east = startEast; east <= this.followOffset.east + radiusM; east += gridM) {
+      const a = project(this.relativeToFollow({ east, north: this.followOffset.north - radiusM }), proj);
+      const b = project(this.relativeToFollow({ east, north: this.followOffset.north + radiusM }), proj);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+    for (let north = startNorth; north <= this.followOffset.north + radiusM; north += gridM) {
+      const a = project(this.relativeToFollow({ east: this.followOffset.east - radiusM, north }), proj);
+      const b = project(this.relativeToFollow({ east: this.followOffset.east + radiusM, north }), proj);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    let nearestCity: { name: string; distanceM: number } | null = null;
+    for (const city of CITIES) {
+      const m = llToMeters(city.lat, city.lon, cfg.centerLat, cfg.centerLon);
+      const relative = this.relativeToFollow(m);
+      const distanceM = rangeMeters(relative);
+      if (!nearestCity || distanceM < nearestCity.distanceM) nearestCity = { name: city.name, distanceM };
+      if (distanceM > radiusM * 1.2) continue;
+      const p = project(relative, proj);
+      if (p.x < 20 || p.x > this.w - 20 || p.y < 20 || p.y > this.h - 20) continue;
+      this.withLabelRotation(cfg, p.x, p.y, () => {
+        ctx.save();
+        ctx.fillStyle = rgba(hexToRgb(cfg.palette.text), 0.28 * cfg.brightness);
+        ctx.font = `500 10px ${cfg.fonts.label}`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 1.8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillText(city.name.toUpperCase(), p.x, p.y + 11);
+        ctx.restore();
+      });
+    }
+    if (nearestCity && nearestCity.distanceM < 160_934) {
+      ctx.save();
+      ctx.fillStyle = rgba(hexToRgb(cfg.palette.text), 0.32 * cfg.brightness);
+      ctx.font = `500 10px ${cfg.fonts.mono}`;
+      ctx.textAlign = "right";
+      ctx.textBaseline = "top";
+      ctx.fillText(
+        `NEAR ${nearestCity.name.toUpperCase()} · ${metersToMiles(nearestCity.distanceM).toFixed(0)} MI`,
+        this.w - 18,
+        18,
+      );
+      ctx.restore();
+    }
+  }
+
+  private drawFollowPlaceLabels(cfg: Config, proj: ProjOpts): void {
+    const ctx = this.ctx;
+    const radiusM = cfg.radiusMiles * 1609.344;
+    let nearestCity: { name: string; distanceM: number } | null = null;
+
+    for (const city of CITIES) {
+      const relative = this.relativeToFollow(
+        llToMeters(city.lat, city.lon, cfg.centerLat, cfg.centerLon),
+      );
+      const distanceM = rangeMeters(relative);
+      if (!nearestCity || distanceM < nearestCity.distanceM) nearestCity = { name: city.name, distanceM };
+      if (distanceM > radiusM * 1.8) continue;
+      const p = project(relative, proj);
+      if (p.x < 45 || p.x > this.w - 45 || p.y < 35 || p.y > this.h - 35) continue;
+      this.withLabelRotation(cfg, p.x, p.y, () => {
+        ctx.save();
+        ctx.fillStyle = rgba(hexToRgb(cfg.palette.text), 0.72 * cfg.brightness);
+        ctx.font = `600 12px ${cfg.fonts.label}`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.shadowColor = "rgba(0,0,0,0.95)";
+        ctx.shadowBlur = 8;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillText(city.name.toUpperCase(), p.x, p.y + 14);
+        ctx.restore();
+      });
+    }
+
+    let nearestAirport: { airport: Airport; distanceM: number } | null = null;
+    for (const airport of AIRPORTS) {
+      const relative = this.relativeToFollow(
+        llToMeters(airport.lat, airport.lon, cfg.centerLat, cfg.centerLon),
+      );
+      const distanceM = rangeMeters(relative);
+      if (!nearestAirport || distanceM < nearestAirport.distanceM) {
+        nearestAirport = { airport, distanceM };
+      }
+    }
+
+    ctx.save();
+    const x = this.w - 18;
+    let y = 18;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+    ctx.shadowColor = "rgba(0,0,0,0.95)";
+    ctx.shadowBlur = 8;
+    if (nearestCity) {
+      ctx.fillStyle = rgba(hexToRgb(cfg.palette.text), 0.75 * cfg.brightness);
+      ctx.font = `600 12px ${cfg.fonts.mono}`;
+      ctx.fillText(
+        `NEAR ${nearestCity.name.toUpperCase()} · ${metersToMiles(nearestCity.distanceM).toFixed(0)} MI`,
+        x,
+        y,
+      );
+      y += 17;
+    }
+    if (nearestAirport) {
+      ctx.fillStyle = rgba([150, 180, 220], 0.74 * cfg.brightness);
+      ctx.font = `500 10px ${cfg.fonts.mono}`;
+      ctx.fillText(
+        `AIRPORT ${nearestAirport.airport.name} · ${metersToMiles(nearestAirport.distanceM).toFixed(0)} MI`,
+        x,
+        y,
+      );
+    }
+    ctx.restore();
+  }
+
+  private drawAirportAreas(
+    areas: AirportArea[] | undefined,
+    cfg: Config,
+    proj: ProjOpts,
+    color: [number, number, number],
+    alpha: number,
+  ): void {
+    for (const area of areas ?? []) {
+      const points = area.points.map((point) => this.toScreen(point, cfg, proj));
+      if (points.length < 3) continue;
+      this.ctx.save();
+      this.ctx.fillStyle = rgba(color, alpha * cfg.brightness);
+      this.ctx.beginPath();
+      this.ctx.moveTo(points[0].x, points[0].y);
+      for (const point of points.slice(1)) this.ctx.lineTo(point.x, point.y);
+      this.ctx.closePath();
+      this.ctx.fill();
+      this.ctx.restore();
+    }
+  }
+
+  private drawRunwayIdent(
+    ident: string,
+    end: Point,
+    opposite: Point,
+    cfg: Config,
+    color: [number, number, number],
+  ): void {
+    const angle = Math.atan2(opposite.y - end.y, opposite.x - end.x);
+    this.ctx.save();
+    this.ctx.translate(end.x + Math.cos(angle) * 10, end.y + Math.sin(angle) * 10);
+    this.ctx.rotate(angle);
+    this.ctx.font = `500 8px ${cfg.fonts.label}`;
+    this.ctx.fillStyle = rgba(color, 0.42 * cfg.brightness);
+    this.ctx.textAlign = "center";
+    this.ctx.textBaseline = "middle";
+    this.ctx.fillText(ident, 0, 0);
+    this.ctx.restore();
+  }
+
   private toScreen(ll: [number, number], cfg: Config, proj: ProjOpts): Point {
-    return project(llToMeters(ll[0], ll[1], cfg.centerLat, cfg.centerLon), proj);
+    return project(
+      this.relativeToFollow(llToMeters(ll[0], ll[1], cfg.centerLat, cfg.centerLon)),
+      proj,
+    );
+  }
+
+  private relativeToFollow(m: Meters): Meters {
+    return {
+      east: m.east - this.followOffset.east,
+      north: m.north - this.followOffset.north,
+    };
+  }
+
+  private updateFollowCamera(hex: string, target: Meters | undefined, frameDt: number): void {
+    if (hex !== this.activeFollowHex) {
+      this.activeFollowHex = hex;
+      this.followVelocity = { east: 0, north: 0 };
+      // A restored or newly selected target may already be outside the home
+      // viewport. Lock onto it immediately so it cannot be clipped while the
+      // camera eases across a large distance; subsequent movement stays smooth.
+      if (hex && target) {
+        this.followOffset = { ...target };
+        return;
+      }
+    }
+    const destination = hex ? target : { east: 0, north: 0 };
+    if (!destination) return;
+
+    const dt = Math.min(frameDt, 0.05);
+    const omega = 4.5;
+    const updateAxis = (position: number, velocity: number, destination: number): [number, number] => {
+      const acceleration = omega * omega * (destination - position) - 2 * omega * velocity;
+      const nextVelocity = velocity + acceleration * dt;
+      return [position + nextVelocity * dt, nextVelocity];
+    };
+    [this.followOffset.east, this.followVelocity.east] = updateAxis(
+      this.followOffset.east,
+      this.followVelocity.east,
+      destination.east,
+    );
+    [this.followOffset.north, this.followVelocity.north] = updateAxis(
+      this.followOffset.north,
+      this.followVelocity.north,
+      destination.north,
+    );
+    if (!hex && Math.hypot(this.followOffset.east, this.followOffset.north) < 1) {
+      this.followOffset = { east: 0, north: 0 };
+      this.followVelocity = { east: 0, north: 0 };
+    }
   }
 
   // --- sky layer (sun / moon / stars / satellites) ---
@@ -769,7 +1161,7 @@ export class Renderer {
     const pts: { p: Point; age: number }[] = [];
     for (const s of h) {
       if (s.t < tt - windowMs || s.t > tt) continue;
-      pts.push({ p: project(s.m, proj), age: (tt - s.t) / windowMs });
+      pts.push({ p: project(this.relativeToFollow(s.m), proj), age: (tt - s.t) / windowMs });
     }
     pts.push({ p: v.p, age: 0 });
     if (pts.length < 2) return;
@@ -777,17 +1169,17 @@ export class Renderer {
     ctx.save();
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    for (let i = 1; i < pts.length; i++) {
-      const a = pts[i - 1];
-      const b = pts[i];
-      const f = 1 - b.age; // 1 at head, 0 at tail
-      ctx.strokeStyle = rgba(v.color, 0.55 * f * v.alpha);
-      ctx.lineWidth = 0.7 + 2.2 * f * (cfg.glyphSizePx / 14);
-      ctx.beginPath();
-      ctx.moveTo(a.p.x, a.p.y);
-      ctx.lineTo(b.p.x, b.p.y);
-      ctx.stroke();
-    }
+    const tail = pts[0].p;
+    const head = pts[pts.length - 1].p;
+    const gradient = ctx.createLinearGradient(tail.x, tail.y, head.x, head.y);
+    gradient.addColorStop(0, rgba(v.color, 0));
+    gradient.addColorStop(1, rgba(v.color, 0.55 * v.alpha));
+    ctx.strokeStyle = gradient;
+    ctx.lineWidth = 1.2 + 1.5 * (cfg.glyphSizePx / 14);
+    ctx.beginPath();
+    ctx.moveTo(tail.x, tail.y);
+    for (const point of pts.slice(1)) ctx.lineTo(point.p.x, point.p.y);
+    ctx.stroke();
     ctx.restore();
   }
 
@@ -811,12 +1203,22 @@ export class Renderer {
     ctx.arc(0, 0, s * 1.7, 0, Math.PI * 2);
     ctx.fill();
 
+    if (v.followed) {
+      ctx.strokeStyle = rgba(color, 0.75 * v.alpha);
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.arc(0, 0, s * 2.15, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
     drawAircraftGlyph(ctx, kind, s, color, v.alpha, this.frameT, hexSeed(v.tr.ac.hex));
     ctx.restore();
   }
 
   // --- labels: restrained typography, nearest only ---
-  private placedBoxes: { x: number; y: number; w: number; h: number }[] = [];
+  private labelGrid = new Map<string, { x: number; y: number; w: number; h: number }[]>();
+  private static readonly LABEL_CELL_SIZE = 160;
 
   private drawLabels(cfg: Config, nearestFirst: Visible[]): void {
     const limit =
@@ -825,7 +1227,7 @@ export class Renderer {
         : cfg.labelDensity === "nearestN"
           ? cfg.nearestN
           : 1;
-    this.placedBoxes = [];
+    this.labelGrid.clear();
     for (let i = 0; i < Math.min(limit, nearestFirst.length); i++) {
       // Nearest labels brightest; gently dim further ones (but keep readable).
       const prom = 1 - i / Math.max(1, nearestFirst.length);
@@ -859,7 +1261,7 @@ export class Renderer {
 
   private collides(b: { x: number; y: number; w: number; h: number }): boolean {
     const pad = 3;
-    for (const p of this.placedBoxes) {
+    for (const p of this.labelCandidates(b, pad)) {
       if (
         b.x - pad < p.x + p.w &&
         b.x + b.w + pad > p.x &&
@@ -872,6 +1274,29 @@ export class Renderer {
     return false;
   }
 
+  private labelCandidates(b: { x: number; y: number; w: number; h: number }, pad = 0) {
+    const size = Renderer.LABEL_CELL_SIZE;
+    const found = new Set<{ x: number; y: number; w: number; h: number }>();
+    for (let x = Math.floor((b.x - pad) / size); x <= Math.floor((b.x + b.w + pad) / size); x++) {
+      for (let y = Math.floor((b.y - pad) / size); y <= Math.floor((b.y + b.h + pad) / size); y++) {
+        for (const box of this.labelGrid.get(`${x}:${y}`) ?? []) found.add(box);
+      }
+    }
+    return found;
+  }
+
+  private placeLabelBox(box: { x: number; y: number; w: number; h: number }): void {
+    const size = Renderer.LABEL_CELL_SIZE;
+    for (let x = Math.floor(box.x / size); x <= Math.floor((box.x + box.w) / size); x++) {
+      for (let y = Math.floor(box.y / size); y <= Math.floor((box.y + box.h) / size); y++) {
+        const key = `${x}:${y}`;
+        const cell = this.labelGrid.get(key);
+        if (cell) cell.push(box);
+        else this.labelGrid.set(key, [box]);
+      }
+    }
+  }
+
   private labelLines(cfg: Config, ac: Aircraft): { text: string; kind: "title" | "sub" }[] {
     const f = cfg.showFields;
     const out: { text: string; kind: "title" | "sub" }[] = [];
@@ -880,10 +1305,8 @@ export class Renderer {
 
     const sub: string[] = [];
     if (f.type && (ac.typeName || ac.typeCode)) sub.push(ac.typeName ?? ac.typeCode!);
-    const alt = ac.altBaro ?? ac.altGeom;
     if (f.altitude) {
-      if (ac.onGround) sub.push("GND");
-      else if (alt != null) sub.push(`${alt.toLocaleString("en-US")} ft`);
+      sub.push(formatAltitudeLabel(ac));
     }
     if (f.speed && ac.gs != null) sub.push(`${Math.round(ac.gs)} kt`);
     if (sub.length) out.push({ text: sub.join("   "), kind: "sub" });
@@ -940,7 +1363,7 @@ export class Renderer {
     }
     box.x = Math.max(6, Math.min(box.x, this.w - 6 - w));
     box.y = Math.max(6, Math.min(box.y, this.h - 6 - h));
-    this.placedBoxes.push(box);
+    this.placeLabelBox(box);
 
     // Hairline leader from glyph to the nearest edge of the label.
     const anchorX = box.x + w / 2 < v.p.x ? box.x + w : box.x;
@@ -1034,11 +1457,10 @@ export class Renderer {
     }
     ctx.font = `400 15px ${cfg.fonts.label}`;
     ctx.fillStyle = rgba(hexToRgb(cfg.palette.text), 0.85 * v.alpha);
-    const dpAlt = ac.altBaro ?? ac.altGeom;
     const bits = [
       ac.airline,
       ac.typeName ?? ac.typeCode,
-      ac.onGround ? "on ground" : dpAlt != null ? `${dpAlt.toLocaleString("en-US")} ft` : null,
+      formatAltitudeLabel(ac, { verboseGround: true, includeFeetAtFlightLevel: true }),
       ac.gs != null ? `${Math.round(ac.gs)} kt` : null,
       ac.origin && ac.destination && routePlausible(ac, cfg) ? `${ac.origin} → ${ac.destination}` : null,
     ].filter(Boolean);
@@ -1094,6 +1516,25 @@ function localTimeAt(lon: number): string {
   const hh = Math.floor(m / 60);
   const mm = Math.floor(m % 60);
   return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+
+function formatAltitudeLabel(
+  ac: Aircraft,
+  options: { verboseGround?: boolean; includeFeetAtFlightLevel?: boolean } = {},
+): string {
+  const { verboseGround = false, includeFeetAtFlightLevel = false } = options;
+  if (ac.onGround) return verboseGround ? "on ground" : "GND";
+
+  const alt = ac.altBaro ?? ac.altGeom;
+  if (alt == null) return "ALT —";
+
+  const rounded = Math.max(0, Math.round(alt));
+  if (rounded >= 18000) {
+    const fl = String(Math.round(rounded / 100)).padStart(3, "0");
+    if (includeFeetAtFlightLevel) return `FL${fl} (${rounded.toLocaleString("en-US")} ft)`;
+    return `FL${fl}`;
+  }
+  return `${rounded.toLocaleString("en-US")} ft`;
 }
 
 /** Cross-track distance (miles) of a point from the great circle p1→p2. */
@@ -1155,8 +1596,14 @@ function routePlausible(ac: Aircraft, cfg: Config): boolean {
 }
 
 function hexToRgb(hex: string): [number, number, number] {
+  const cached = hexRgbCache.get(hex);
+  if (cached) return cached;
   const m = hex.replace("#", "");
   const n = m.length === 3 ? m.split("").map((c) => c + c).join("") : m;
   const int = parseInt(n, 16);
-  return [(int >> 16) & 255, (int >> 8) & 255, int & 255];
+  const rgb: [number, number, number] = [(int >> 16) & 255, (int >> 8) & 255, int & 255];
+  hexRgbCache.set(hex, rgb);
+  return rgb;
 }
+
+const hexRgbCache = new Map<string, [number, number, number]>();

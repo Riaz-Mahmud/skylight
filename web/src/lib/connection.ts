@@ -1,6 +1,7 @@
 // Single auto-reconnecting WebSocket connection shared within a page.
 // Receives config / aircraft / status; sends config patches.
 
+import { PROTOCOL_VERSION } from "@shared/index.js";
 import type {
   Aircraft,
   ClientMessage,
@@ -15,6 +16,7 @@ export interface StreamState {
   now: number;
   aircraft: Aircraft[];
   status: SourceStatus | null;
+  error: string | null;
 }
 
 type Listener = (state: StreamState) => void;
@@ -24,6 +26,14 @@ export class Connection {
   private listeners = new Set<Listener>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
+  private reconnectAttempt = 0;
+  private aircraftByHex = new Map<string, Aircraft>();
+  private aircraftSeq = 0;
+  private queuedPatch: Partial<Config> | null = null;
+  private queue: ClientMessage[] = [];
+  private patchTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private lastMessageAt = 0;
 
   state: StreamState = {
     connected: false,
@@ -31,6 +41,7 @@ export class Connection {
     now: 0,
     aircraft: [],
     status: null,
+    error: null,
   };
 
   constructor(private role: "display" | "control") {}
@@ -53,11 +64,16 @@ export class Connection {
       return;
     }
     this.ws.onopen = () => {
-      this.send({ type: "hello", role: this.role });
-      this.update({ connected: true });
+      this.reconnectAttempt = 0;
+      this.lastMessageAt = Date.now();
+      this.sendNow({ type: "hello", role: this.role, protocolVersion: PROTOCOL_VERSION });
+      this.flushQueue();
+      this.startHeartbeat();
+      this.update({ connected: true, error: null });
     };
     this.ws.onclose = () => {
-      this.update({ connected: false });
+      this.stopHeartbeat();
+      this.update({ connected: false, config: null });
       this.scheduleReconnect();
     };
     this.ws.onerror = () => this.ws?.close();
@@ -69,10 +85,11 @@ export class Connection {
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (!this.closed) this.open();
-    }, 1500);
+    }, Math.min(30_000, 1500 * 2 ** this.reconnectAttempt++));
   }
 
   private onMessage(raw: string): void {
+    this.lastMessageAt = Date.now();
     let msg: ServerMessage;
     try {
       msg = JSON.parse(raw) as ServerMessage;
@@ -84,25 +101,81 @@ export class Connection {
         this.update({ config: msg.config });
         break;
       case "aircraft":
+        this.aircraftByHex = new Map(msg.aircraft.map((ac) => [ac.hex, ac]));
+        this.aircraftSeq = msg.seq;
         this.update({ now: msg.now, aircraft: msg.aircraft });
+        break;
+      case "aircraftDelta":
+        if (msg.seq !== this.aircraftSeq + 1) {
+          this.send({ type: "requestSnapshot" });
+          break;
+        }
+        for (const hex of msg.remove) this.aircraftByHex.delete(hex);
+        for (const ac of msg.upsert) this.aircraftByHex.set(ac.hex, ac);
+        this.aircraftSeq = msg.seq;
+        this.update({ now: msg.now, aircraft: [...this.aircraftByHex.values()] });
         break;
       case "status":
         this.update({ status: msg.status });
+        break;
+      case "ack":
+      case "pong":
+        break;
+      case "error":
+        this.update({ error: msg.message });
         break;
     }
   }
 
   send(msg: ClientMessage): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(msg));
+      this.sendNow(msg);
+    } else if (msg.type !== "hello" && msg.type !== "requestSnapshot") {
+      this.queue.push(msg);
     }
   }
 
   patchConfig(patch: Partial<Config>): void {
-    this.send({ type: "patchConfig", patch });
+    this.queuedPatch = { ...this.queuedPatch, ...patch };
+    if (this.patchTimer) clearTimeout(this.patchTimer);
+    this.patchTimer = setTimeout(() => {
+      this.patchTimer = null;
+      if (this.ws?.readyState === WebSocket.OPEN && this.queuedPatch) {
+        this.sendNow({ type: "patchConfig", patch: this.queuedPatch });
+        this.queuedPatch = null;
+      }
+    }, 60);
   }
   resetConfig(): void {
     this.send({ type: "resetConfig" });
+  }
+
+  private sendNow(msg: ClientMessage): void {
+    this.ws?.send(JSON.stringify(msg));
+  }
+
+  private flushQueue(): void {
+    if (this.queuedPatch) {
+      this.sendNow({ type: "patchConfig", patch: this.queuedPatch });
+      this.queuedPatch = null;
+    }
+    for (const msg of this.queue.splice(0)) this.sendNow(msg);
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      if (Date.now() - this.lastMessageAt > 45_000) {
+        this.ws?.close();
+        return;
+      }
+      this.sendNow({ type: "ping" });
+    }, 15_000);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
   }
 
   subscribe(fn: Listener): () => void {
@@ -119,6 +192,8 @@ export class Connection {
   close(): void {
     this.closed = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.patchTimer) clearTimeout(this.patchTimer);
+    this.stopHeartbeat();
     this.ws?.close();
   }
 }

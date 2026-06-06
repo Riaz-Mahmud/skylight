@@ -40,6 +40,10 @@ export interface Config {
   centerLat: number;
   centerLon: number;
   radiusMiles: number;
+  /** Aircraft ICAO hex to keep centered. Empty string disables follow mode. */
+  followFlightHex: string;
+  /** Show moving geographic grid and nearby city labels while following. */
+  showFollowContext: boolean;
 
   // --- calibration (tune against a real overhead pass) ---
   /** Rotate the whole field, degrees. */
@@ -127,6 +131,8 @@ export const DEFAULT_CONFIG: Config = {
   centerLat: 37.6213,
   centerLon: -122.379,
   radiusMiles: 3,
+  followFlightHex: "",
+  showFollowContext: true,
 
   rotationDeg: 0,
   mirrorX: true,
@@ -138,8 +144,8 @@ export const DEFAULT_CONFIG: Config = {
   hideOnGround: true,
 
   interpolate: true,
-  maxExtrapolationSec: 60,
-  staleSec: 120,
+  maxExtrapolationSec: 15,
+  staleSec: 30,
   smoothing: 0.18,
   maxFps: 0,
 

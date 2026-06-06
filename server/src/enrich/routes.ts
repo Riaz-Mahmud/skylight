@@ -37,6 +37,7 @@ export class RouteEnricher {
   private inflight = new Map<string, Promise<void>>();
   private dirty = false;
   private ttlMs: number;
+  private static readonly MAX_INFLIGHT = 8;
 
   constructor(
     private cachePath: string,
@@ -84,7 +85,7 @@ export class RouteEnricher {
 
   private fetchRoute(cs: string): void {
     const key = "r:" + cs;
-    if (this.inflight.has(key)) return;
+    if (this.inflight.has(key) || this.inflight.size >= RouteEnricher.MAX_INFLIGHT) return;
     const p = (async () => {
       try {
         const res = await fetch(`${API}/callsign/${encodeURIComponent(cs)}`, {
@@ -121,7 +122,7 @@ export class RouteEnricher {
 
   private fetchAircraft(hex: string): void {
     const key = "a:" + hex;
-    if (this.inflight.has(key)) return;
+    if (this.inflight.has(key) || this.inflight.size >= RouteEnricher.MAX_INFLIGHT) return;
     const p = (async () => {
       try {
         const res = await fetch(`${API}/aircraft/${encodeURIComponent(hex)}`, {

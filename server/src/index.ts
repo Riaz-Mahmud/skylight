@@ -8,11 +8,12 @@ import { dirname, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import express from "express";
 import type { DataSource } from "@shared/index.js";
-import { ConfigStore } from "./config-store.js";
+import { ConfigStore, ConfigValidationError } from "./config-store.js";
 import { RouteEnricher } from "./enrich/routes.js";
 import { Poller } from "./datasource.js";
 import { Hub } from "./hub.js";
 import { TleStore } from "./tle.js";
+import { FlightStats } from "./stats.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = resolve(__dirname, "../data");
@@ -45,15 +46,11 @@ async function main(): Promise<void> {
   await tleStore.load();
 
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: "64kb" }));
 
   const server = createServer(app);
-  const hub = new Hub(server, {
-    store,
-    getSnapshot: () => poller.getSnapshot(),
-    getStatus: () => poller.getStatus(),
-  });
-
+  const stats = new FlightStats();
+  let hub: Hub;
   const poller = new Poller({
     source: SOURCE,
     radioUrl: RADIO_URL,
@@ -63,14 +60,30 @@ async function main(): Promise<void> {
     apiPollMs: API_POLL_MS,
     getConfig: () => store.get(),
     enricher,
-    onSnapshot: (now, aircraft) => hub.broadcastAircraft(now, aircraft),
+    onSnapshot: (now, aircraft) => {
+      stats.observe(now, aircraft);
+      hub.broadcastAircraft(now, aircraft);
+    },
     onStatus: (status) => hub.broadcastStatus(status),
+  });
+  hub = new Hub(server, {
+    store,
+    getSnapshot: () => poller.getSnapshot(),
+    getStatus: () => poller.getStatus(),
   });
 
   // --- REST API (handy for debugging + non-WS clients) ---
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
   app.get("/api/config", (_req, res) => res.json(store.get()));
-  app.post("/api/config", (req, res) => res.json(store.patch(req.body)));
+  app.post("/api/config", (req, res) => {
+    try {
+      return res.json(store.patch(req.body));
+    } catch (error) {
+      if (error instanceof ConfigValidationError) return res.status(400).json({ errors: error.errors });
+      throw error;
+    }
+  });
+  let lastSourceChange = 0;
   app.post("/api/config/reset", (_req, res) => res.json(store.reset()));
   app.get("/api/setup/status", (_req, res) =>
     res.json({ hasSavedConfig: store.hasSavedConfig() }),
@@ -95,12 +108,17 @@ async function main(): Promise<void> {
   });
   app.get("/api/aircraft", (_req, res) => res.json(poller.getSnapshot()));
   app.get("/api/status", (_req, res) => res.json(poller.getStatus()));
+  app.get("/api/stats", (_req, res) => res.json(stats.get()));
   app.get("/api/tle", async (_req, res) => res.json(await tleStore.get()));
   app.post("/api/source", (req, res) => {
+    if (Date.now() - lastSourceChange < 1000) {
+      return res.status(429).json({ error: "source may only be changed once per second" });
+    }
     const s = req.body?.source;
     if (s !== "radio" && s !== "api") {
       return res.status(400).json({ error: "source must be 'radio' or 'api'" });
     }
+    lastSourceChange = Date.now();
     poller.setSource(s);
     res.json(poller.getStatus());
   });
@@ -127,6 +145,14 @@ async function main(): Promise<void> {
     console.log(`[server] data source: ${SOURCE} (${SOURCE === "radio" ? RADIO_URL : API_URL})`);
     console.log(`[server] control panel: http://<this-host>:${PORT}/control`);
   });
+
+  const shutdown = () => {
+    poller.stop();
+    hub.close();
+    server.close();
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
 }
 
 main().catch((err) => {

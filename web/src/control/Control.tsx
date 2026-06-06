@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Aircraft, Config, ShowFields } from "@shared/index.js";
 import { useStream } from "../lib/useStream.js";
 import { nextISSPass, type Tle } from "../display/celestial.js";
 import { ColorRow, Row, Section, Segmented, Slider, Toggle } from "./components.js";
 import { PRESETS } from "./presets.js";
 import { LOCATION_PRESETS } from "./locationPresets.js";
+import { type City, prefetchCities, searchCities } from "../lib/cities.js";
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -141,16 +142,62 @@ function ClosestAircraftCard({
   );
 }
 
+function NearbyAircraftList({
+  aircraft,
+  cfg,
+  onSelect,
+}: {
+  aircraft: Aircraft[];
+  cfg: Config;
+  onSelect: (ac: Aircraft) => void;
+}) {
+  const followed = aircraft.find(
+    (ac) => ac.hex.toLowerCase() === cfg.followFlightHex.toLowerCase(),
+  );
+  const refLat = followed?.lat ?? cfg.centerLat;
+  const refLon = followed?.lon ?? cfg.centerLon;
+  const nearby = useMemo(
+    () =>
+      aircraft
+        .filter((ac) => ac.lat != null && ac.lon != null && !ac.onGround)
+        .map((ac) => ({
+          ac,
+          distance: distanceMiles(refLat, refLon, ac.lat!, ac.lon!),
+        }))
+        .sort((a, b) => a.distance - b.distance)
+        .slice(0, 8),
+    [aircraft, refLat, refLon],
+  );
+  if (!nearby.length) return null;
+
+  return (
+    <div className="nearby-flights">
+      <div className="nearby-flights-title">Choose a flight to follow</div>
+      <div className="nearby-flights-list">
+        {nearby.map(({ ac, distance }) => (
+          <button key={ac.hex} onClick={() => onSelect(ac)}>
+            <strong>{ac.flight ?? ac.hex.toUpperCase()}</strong>
+            <span>{distance.toFixed(1)} mi</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /** Full-screen flight detail popup. */
 function FlightDetailPopup({
   ac,
   cfg,
   onClose,
+  onToggleFollow,
 }: {
   ac: Aircraft;
   cfg: Config;
   onClose: () => void;
+  onToggleFollow: () => void;
 }) {
+  const following = cfg.followFlightHex.toLowerCase() === ac.hex.toLowerCase();
   const dist =
     ac.lat != null && ac.lon != null
       ? distanceMiles(cfg.centerLat, cfg.centerLon, ac.lat, ac.lon)
@@ -192,12 +239,15 @@ function FlightDetailPopup({
             </div>
           ))}
         </div>
+        <button className={`follow-flight-btn ${following ? "active" : ""}`} onClick={onToggleFollow}>
+          {following ? "Stop following flight" : "Follow flight on display"}
+        </button>
       </div>
     </div>
   );
 }
 
-/** Location preset picker — airport quick-pick chips + manual lat/lon inputs. */
+/** Location section: city search + airport quick-picks + manual lat/lon. */
 function LocationSection({
   cfg,
   onPatch,
@@ -208,19 +258,28 @@ function LocationSection({
   const [lat, setLat] = useState(String(cfg.centerLat));
   const [lon, setLon] = useState(String(cfg.centerLon));
   const [dirty, setDirty] = useState(false);
+  const [cityQuery, setCityQuery] = useState("");
+  const [cityResults, setCityResults] = useState<City[]>([]);
+  const [searching, setSearching] = useState(false);
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Keep local inputs in sync when config changes from elsewhere.
+  // Prefetch cities dataset as soon as this section mounts.
+  useEffect(() => { prefetchCities(); }, []);
+
+  // Keep lat/lon inputs in sync when config changes from elsewhere.
   useEffect(() => {
     setLat(String(cfg.centerLat));
     setLon(String(cfg.centerLon));
     setDirty(false);
   }, [cfg.centerLat, cfg.centerLon]);
 
-  const applyLocation = (newLat: number, newLon: number, newRadius?: number) => {
+  const applyLocation = useCallback((newLat: number, newLon: number, newRadius?: number) => {
     const patch: Partial<Config> = { centerLat: newLat, centerLon: newLon };
     if (newRadius != null) patch.radiusMiles = newRadius;
     onPatch(patch);
-  };
+    setCityQuery("");
+    setCityResults([]);
+  }, [onPatch]);
 
   const commitManual = () => {
     const parsedLat = parseFloat(lat);
@@ -232,18 +291,59 @@ function LocationSection({
     setDirty(false);
   };
 
+  // Debounced city search.
+  const handleCityInput = (q: string) => {
+    setCityQuery(q);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    if (q.trim().length < 2) { setCityResults([]); return; }
+    setSearching(true);
+    searchTimer.current = setTimeout(async () => {
+      const results = await searchCities(q);
+      setCityResults(results);
+      setSearching(false);
+    }, 200);
+  };
+
   return (
     <>
       <Row label="Radius">
-        <Slider
-          value={cfg.radiusMiles}
-          min={0.5}
-          max={50}
-          step={0.5}
-          unit="mi"
-          onChange={(v) => onPatch({ radiusMiles: v })}
-        />
+        <Slider value={cfg.radiusMiles} min={0.5} max={50} step={0.5} unit="mi"
+          onChange={(v) => onPatch({ radiusMiles: v })} />
       </Row>
+
+      {/* City search */}
+      <div className="location-search">
+        <div className="location-search-wrap">
+          <input
+            className="location-input location-search-input"
+            type="text"
+            placeholder="Search city…"
+            value={cityQuery}
+            onChange={(e) => handleCityInput(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          {searching && <span className="location-search-spinner" />}
+        </div>
+        {cityResults.length > 0 && (
+          <ul className="city-results">
+            {cityResults.map((c, i) => (
+              <li key={i}>
+                <button
+                  className="city-result-btn"
+                  onClick={() => applyLocation(c.lat, c.lon)}
+                >
+                  <span className="city-result-name">{c.name}</span>
+                  {c.country && <span className="city-result-country">{c.country}</span>}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {cityResults.length === 0 && cityQuery.trim().length >= 2 && !searching && (
+          <div className="city-no-results">No cities found — try the airport quick-picks or set coordinates manually</div>
+        )}
+      </div>
 
       {/* Airport quick-picks */}
       <div className="location-airports">
@@ -254,8 +354,7 @@ function LocationSection({
               Math.abs(cfg.centerLat - lp.lat) < 0.01 &&
               Math.abs(cfg.centerLon - lp.lon) < 0.01;
             return (
-              <button
-                key={lp.code}
+              <button key={lp.code}
                 className={`chip ${active ? "on" : ""}`}
                 onClick={() => applyLocation(lp.lat, lp.lon, lp.radiusMiles)}
                 title={lp.name}
@@ -271,12 +370,7 @@ function LocationSection({
       <div className="location-manual">
         <div className="location-field">
           <label className="location-field-label">Latitude</label>
-          <input
-            className="location-input"
-            type="number"
-            step="0.0001"
-            min="-90"
-            max="90"
+          <input className="location-input" type="number" step="0.0001" min="-90" max="90"
             value={lat}
             onChange={(e) => { setLat(e.target.value); setDirty(true); }}
             onBlur={commitManual}
@@ -285,12 +379,7 @@ function LocationSection({
         </div>
         <div className="location-field">
           <label className="location-field-label">Longitude</label>
-          <input
-            className="location-input"
-            type="number"
-            step="0.0001"
-            min="-180"
-            max="180"
+          <input className="location-input" type="number" step="0.0001" min="-180" max="180"
             value={lon}
             onChange={(e) => { setLon(e.target.value); setDirty(true); }}
             onBlur={commitManual}
@@ -298,9 +387,7 @@ function LocationSection({
           />
         </div>
         {dirty && (
-          <button className="location-apply" onClick={commitManual}>
-            Apply
-          </button>
+          <button className="location-apply" onClick={commitManual}>Apply</button>
         )}
       </div>
     </>
@@ -375,6 +462,14 @@ export function Control() {
           ac={activeAc!}
           cfg={cfg}
           onClose={() => setSelectedAc(null)}
+          onToggleFollow={() =>
+            set({
+              followFlightHex:
+                cfg.followFlightHex.toLowerCase() === activeAc!.hex.toLowerCase()
+                  ? ""
+                  : activeAc!.hex.toLowerCase(),
+            })
+          }
         />
       )}
 
@@ -388,6 +483,17 @@ export function Control() {
         </div>
       </header>
 
+      {cfg.followFlightHex && (
+        <div className="follow-banner">
+          <span>
+            Following{" "}
+            {state.aircraft.find((ac) => ac.hex.toLowerCase() === cfg.followFlightHex.toLowerCase())?.flight
+              ?? cfg.followFlightHex.toUpperCase()}
+          </span>
+          <button onClick={() => set({ followFlightHex: "" })}>Stop</button>
+        </div>
+      )}
+
       {/* Closest aircraft card — always visible when aircraft are present */}
       {state.aircraft.length > 0 && (
         <div className="closest-wrap">
@@ -396,6 +502,7 @@ export function Control() {
             cfg={cfg}
             onSelect={setSelectedAc}
           />
+          <NearbyAircraftList aircraft={state.aircraft} cfg={cfg} onSelect={setSelectedAc} />
         </div>
       )}
 
@@ -405,6 +512,31 @@ export function Control() {
           <div className="section-title" style={{ margin: "0 0 8px 4px" }}>Presets</div>
           <PresetPicker onApply={set} />
         </div>
+
+        <Section title="Follow flight">
+          <Row label="Status">
+            <span className={cfg.followFlightHex ? "follow-setting-active" : "follow-setting-idle"}>
+              {cfg.followFlightHex
+                ? `Following ${
+                    state.aircraft.find(
+                      (ac) => ac.hex.toLowerCase() === cfg.followFlightHex.toLowerCase(),
+                    )?.flight ?? cfg.followFlightHex.toUpperCase()
+                  }`
+                : "Not following"}
+            </span>
+          </Row>
+          <Row label="Moving city context" hint="grid and nearby city names">
+            <Toggle
+              value={cfg.showFollowContext}
+              onChange={(v) => set({ showFollowContext: v })}
+            />
+          </Row>
+          {cfg.followFlightHex && (
+            <button className="follow-setting-stop" onClick={() => set({ followFlightHex: "" })}>
+              Stop following and return home
+            </button>
+          )}
+        </Section>
 
         <Section title="Location">
           <LocationSection cfg={cfg} onPatch={set} />

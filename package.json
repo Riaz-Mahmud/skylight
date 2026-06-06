@@ -10,6 +10,7 @@
     "dev:server": "pnpm -F server dev",
     "dev:web": "pnpm -F web dev",
     "build": "pnpm -F web build",
+    "generate:cities": "node scripts/generate-cities.mjs",
     "start": "pnpm -F server start",
     "typecheck": "tsc -p shared/tsconfig.json && pnpm -F server typecheck && pnpm -F web typecheck"
   },

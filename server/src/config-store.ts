@@ -3,9 +3,15 @@
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { DEFAULT_CONFIG, mergeConfig, type Config } from "@shared/index.js";
+import { DEFAULT_CONFIG, mergeConfig, validateConfigPatch, type Config } from "@shared/index.js";
 
 type Listener = (config: Config) => void;
+
+export class ConfigValidationError extends Error {
+  constructor(readonly errors: string[]) {
+    super(errors.join("; "));
+  }
+}
 
 export class ConfigStore {
   private config: Config = DEFAULT_CONFIG;
@@ -18,7 +24,8 @@ export class ConfigStore {
   async load(): Promise<void> {
     try {
       const raw = await readFile(this.path, "utf8");
-      this.config = mergeConfig(DEFAULT_CONFIG, JSON.parse(raw) as Partial<Config>);
+      const result = validateConfigPatch(JSON.parse(raw));
+      this.config = mergeConfig(DEFAULT_CONFIG, result.patch);
       this.hasSavedFile = true;
     } catch {
       this.config = DEFAULT_CONFIG; // first run
@@ -34,15 +41,19 @@ export class ConfigStore {
     return this.hasSavedFile;
   }
 
-  patch(patch: Partial<Config>): Config {
-    this.config = mergeConfig(this.config, patch);
+  patch(input: unknown): Config {
+    const result = validateConfigPatch(input);
+    if (result.errors.length) throw new ConfigValidationError(result.errors);
+    this.config = mergeConfig(this.config, result.patch);
     this.emit();
     this.scheduleSave();
     return this.config;
   }
 
-  set(config: Config): Config {
-    this.config = mergeConfig(DEFAULT_CONFIG, config);
+  set(input: unknown): Config {
+    const result = validateConfigPatch(input);
+    if (result.errors.length) throw new ConfigValidationError(result.errors);
+    this.config = mergeConfig(DEFAULT_CONFIG, result.patch);
     this.emit();
     this.scheduleSave();
     return this.config;

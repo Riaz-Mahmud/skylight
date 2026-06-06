@@ -4,6 +4,8 @@ import type { Config } from "./config.js";
 import type { Aircraft } from "./aircraft.js";
 import type { DataSource } from "./config.js";
 
+export const PROTOCOL_VERSION = 1;
+
 export interface SourceStatus {
   source: DataSource;
   /** Whether the most recent poll succeeded. */
@@ -19,12 +21,18 @@ export interface SourceStatus {
 /** Server -> client. */
 export type ServerMessage =
   | { type: "config"; config: Config }
-  | { type: "aircraft"; now: number; aircraft: Aircraft[] }
-  | { type: "status"; status: SourceStatus };
+  | { type: "aircraft"; now: number; seq: number; aircraft: Aircraft[] }
+  | { type: "aircraftDelta"; now: number; seq: number; upsert: Aircraft[]; remove: string[] }
+  | { type: "status"; status: SourceStatus }
+  | { type: "ack"; requestId: string }
+  | { type: "pong" }
+  | { type: "error"; requestId?: string; message: string };
 
 /** Client -> server. */
 export type ClientMessage =
-  | { type: "hello"; role: "display" | "control" }
-  | { type: "patchConfig"; patch: Partial<Config> }
-  | { type: "setConfig"; config: Config }
-  | { type: "resetConfig" };
+  | { type: "hello"; role: "display" | "control"; protocolVersion: number }
+  | { type: "patchConfig"; patch: Partial<Config>; requestId?: string }
+  | { type: "setConfig"; config: Config; requestId?: string }
+  | { type: "resetConfig"; requestId?: string }
+  | { type: "requestSnapshot" }
+  | { type: "ping" };

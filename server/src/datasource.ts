@@ -50,6 +50,7 @@ function normalize(raw: RawAircraft, ts: number): Aircraft | null {
   };
 }
 
+/** Airplanes.live radius is nautical miles; SkyLight config uses statute miles. */
 const NM_PER_MILE = 0.868976;
 
 async function fetchJson(url: string): Promise<any> {
@@ -90,9 +91,9 @@ function mergeSources(radio: Aircraft[], api: Aircraft[]): Aircraft[] {
       byHex.set(r.hex, r);
       continue;
     }
-    const rSeen = (r.seen ?? 0) - 2; // bias toward the local radio
-    const aSeen = existing.seen ?? 999;
-    byHex.set(r.hex, rSeen <= aSeen ? r : existing);
+    const radioArrival = (r.ts ?? 0) + 2000; // local radio keeps a two-second preference
+    const apiArrival = existing.ts ?? 0;
+    byHex.set(r.hex, radioArrival >= apiArrival ? r : existing);
   }
   return [...byHex.values()];
 }
@@ -122,6 +123,14 @@ export class Poller {
   private lastApi: Aircraft[] = [];
   /** hex -> last good enrichment, so resolved routes never flicker back to "—". */
   private sticky = new Map<string, StickyEnrichment>();
+  private tickRunning = false;
+  private apiRunning = false;
+  private apiFailures = 0;
+  private nextApiAttempt = 0;
+  private lastStickyPrune = 0;
+  private followTargetHex = "";
+  private followTargetPosition: { lat: number; lon: number } | null = null;
+  private followedAircraft: Aircraft | null = null;
 
   constructor(private o: PollerOptions) {
     this.status = {
@@ -163,54 +172,119 @@ export class Poller {
     try {
       const url = source === "radio" ? this.o.radioUrl : this.buildApiUrl();
       const json = await fetchJson(url);
-      const rawList: RawAircraft[] = json.aircraft ?? json.ac ?? [];
+      const payload = json.aircraft ?? json.ac;
+      if (!Array.isArray(payload)) throw new Error("malformed aircraft payload");
+      const rawList: RawAircraft[] = payload;
       const list: Aircraft[] = [];
       for (const raw of rawList) {
         const ac = normalize(raw, now);
         if (ac) list.push(ac);
       }
       return list;
-    } catch {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "unknown fetch error";
+      if (source === this.o.source) {
+        this.status = { ...this.status, ok: false, message };
+      }
       return null;
     }
   }
 
   private async refreshApi(): Promise<void> {
-    const list = await this.fetchList("api", Date.now());
-    if (list) this.lastApi = list;
+    if (!this.o.supplementApi || this.o.source !== "radio") return;
+    const now = Date.now();
+    if (this.apiRunning || now < this.nextApiAttempt) return;
+    this.apiRunning = true;
+    try {
+      const list = await this.fetchList("api", now);
+      if (list) {
+        this.lastApi = list;
+        this.apiFailures = 0;
+        this.nextApiAttempt = 0;
+      } else {
+        this.apiFailures++;
+        this.nextApiAttempt = now + Math.min(60_000, this.o.apiPollMs * 2 ** this.apiFailures);
+      }
+    } finally {
+      this.apiRunning = false;
+    }
   }
 
   private buildApiUrl(): string {
     const c = this.o.getConfig();
+    const followHex = c.followFlightHex.toLowerCase();
+    if (followHex !== this.followTargetHex) {
+      this.followTargetHex = followHex;
+      this.followTargetPosition = null;
+      this.followedAircraft = null;
+    }
+    const followed = followHex
+      ? this.last.find((ac) => ac.hex.toLowerCase() === c.followFlightHex.toLowerCase())
+      : undefined;
+    if (followed?.lat != null && followed.lon != null) {
+      this.followTargetPosition = { lat: followed.lat, lon: followed.lon };
+    }
+    const lat = this.followTargetPosition?.lat ?? c.centerLat;
+    const lon = this.followTargetPosition?.lon ?? c.centerLon;
     const r = Math.min(250, Math.ceil(c.radiusMiles * NM_PER_MILE) + 1);
     return this.o.apiUrlTemplate
-      .replace("{lat}", String(c.centerLat))
-      .replace("{lon}", String(c.centerLon))
+      .replace("{lat}", String(lat))
+      .replace("{lon}", String(lon))
       .replace("{r}", String(r));
   }
 
   private async tick(): Promise<void> {
+    if (this.tickRunning) return;
+    this.tickRunning = true;
     const now = Date.now();
-    const primary = await this.fetchList(this.o.source, now);
-    if (primary === null) {
-      this.status = { ...this.status, ok: false, message: "source fetch failed" };
+    try {
+      const primary = await this.fetchList(this.o.source, now);
+      if (primary === null) {
+        this.o.onStatus(this.status);
+        return;
+      }
+      const supplement = this.o.source === "radio" && this.o.supplementApi;
+      const merged = supplement ? mergeSources(primary, this.lastApi) : primary;
+      this.retainFollowedAircraft(merged, now);
+      for (const ac of merged) this.enrich(ac, now);
+      this.last = merged;
+      if (now - this.lastStickyPrune > 60_000) {
+        this.pruneSticky(now);
+        this.lastStickyPrune = now;
+      }
+      this.status = {
+        source: this.o.source,
+        ok: true,
+        count: merged.length,
+        lastOk: now,
+        message: supplement ? `radio + ${this.lastApi.length} via API` : undefined,
+      };
+      this.o.onSnapshot(now, merged);
       this.o.onStatus(this.status);
+    } finally {
+      this.tickRunning = false;
+    }
+  }
+
+  private retainFollowedAircraft(aircraft: Aircraft[], now: number): void {
+    const config = this.o.getConfig();
+    const followHex = config.followFlightHex.toLowerCase();
+    if (!followHex) {
+      this.followedAircraft = null;
       return;
     }
-    const supplement = this.o.source === "radio" && this.o.supplementApi;
-    const merged = supplement ? mergeSources(primary, this.lastApi) : primary;
-    for (const ac of merged) this.enrich(ac, now);
-    this.last = merged;
-    this.pruneSticky(now);
-    this.status = {
-      source: this.o.source,
-      ok: true,
-      count: merged.length,
-      lastOk: now,
-      message: supplement ? `radio + ${this.lastApi.length} via API` : undefined,
-    };
-    this.o.onSnapshot(now, merged);
-    this.o.onStatus(this.status);
+    const current = aircraft.find((ac) => ac.hex.toLowerCase() === followHex);
+    if (current) {
+      this.followedAircraft = current;
+      if (current.lat != null && current.lon != null) {
+        this.followTargetPosition = { lat: current.lat, lon: current.lon };
+      }
+      return;
+    }
+    const cached = this.followedAircraft;
+    if (cached && now - (cached.ts ?? now) <= config.hideOnlyAfterSec * 1000) {
+      aircraft.push(cached);
+    }
   }
 
   private enrich(ac: Aircraft, now: number): void {

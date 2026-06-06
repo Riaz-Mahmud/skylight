@@ -1,0 +1,53 @@
+export interface City {
+  name: string;
+  lat: number;
+  lon: number;
+}
+
+/** Lightweight geographic context for the bundled airport regions. */
+export const CITIES: City[] = [
+  { name: "San Francisco", lat: 37.7749, lon: -122.4194 },
+  { name: "Oakland", lat: 37.8044, lon: -122.2712 },
+  { name: "San Jose", lat: 37.3382, lon: -121.8863 },
+  { name: "New York", lat: 40.7128, lon: -74.0060 },
+  { name: "Newark", lat: 40.7357, lon: -74.1724 },
+  { name: "Los Angeles", lat: 34.0522, lon: -118.2437 },
+  { name: "Long Beach", lat: 33.7701, lon: -118.1937 },
+  { name: "London", lat: 51.5074, lon: -0.1278 },
+  { name: "Reading", lat: 51.4543, lon: -0.9781 },
+  { name: "Slough", lat: 51.5105, lon: -0.5950 },
+  { name: "Windsor", lat: 51.4817, lon: -0.6136 },
+  { name: "Watford", lat: 51.6565, lon: -0.3903 },
+  { name: "Oxford", lat: 51.7520, lon: -1.2577 },
+  { name: "Cambridge", lat: 52.2053, lon: 0.1218 },
+  { name: "Milton Keynes", lat: 52.0406, lon: -0.7594 },
+  { name: "Luton", lat: 51.8787, lon: -0.4200 },
+  { name: "Southampton", lat: 50.9097, lon: -1.4044 },
+  { name: "Portsmouth", lat: 50.8198, lon: -1.0880 },
+  { name: "Brighton", lat: 50.8225, lon: -0.1372 },
+  { name: "Bristol", lat: 51.4545, lon: -2.5879 },
+  { name: "Cardiff", lat: 51.4816, lon: -3.1791 },
+  { name: "Guildford", lat: 51.2362, lon: -0.5704 },
+  { name: "Crawley", lat: 51.1091, lon: -0.1872 },
+  { name: "Manchester", lat: 53.4808, lon: -2.2426 },
+  { name: "Liverpool", lat: 53.4084, lon: -2.9916 },
+  { name: "Leeds", lat: 53.8008, lon: -1.5491 },
+  { name: "Sheffield", lat: 53.3811, lon: -1.4701 },
+  { name: "Nottingham", lat: 52.9548, lon: -1.1581 },
+  { name: "Leicester", lat: 52.6369, lon: -1.1398 },
+  { name: "Newcastle", lat: 54.9783, lon: -1.6178 },
+  { name: "Edinburgh", lat: 55.9533, lon: -3.1883 },
+  { name: "Glasgow", lat: 55.8642, lon: -4.2518 },
+  { name: "Birmingham", lat: 52.4862, lon: -1.8904 },
+  { name: "Coventry", lat: 52.4068, lon: -1.5197 },
+  { name: "Paris", lat: 48.8566, lon: 2.3522 },
+  { name: "Brussels", lat: 50.8503, lon: 4.3517 },
+  { name: "Amsterdam", lat: 52.3676, lon: 4.9041 },
+  { name: "Dublin", lat: 53.3498, lon: -6.2603 },
+  { name: "Frankfurt", lat: 50.1109, lon: 8.6821 },
+  { name: "Dhaka", lat: 23.8103, lon: 90.4125 },
+  { name: "Dubai", lat: 25.2048, lon: 55.2708 },
+  { name: "Sharjah", lat: 25.3463, lon: 55.4209 },
+  { name: "Singapore", lat: 1.3521, lon: 103.8198 },
+  { name: "Johor Bahru", lat: 1.4927, lon: 103.7414 },
+];

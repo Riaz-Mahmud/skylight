@@ -9,6 +9,11 @@ interface SetupStatus {
   hasSavedConfig: boolean;
 }
 
+interface FlightStats {
+  uniqueAircraft: number;
+  activeAircraft: number;
+}
+
 interface DiagSnapshot {
   // timing
   fetchedAt: number;
@@ -67,6 +72,7 @@ export function Diagnostics() {
   const { state, conn } = useStream("control");
   const [health, setHealth] = useState<ApiHealth | null>(null);
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
+  const [flightStats, setFlightStats] = useState<FlightStats | null>(null);
   const [lastWsMs, setLastWsMs] = useState<number | null>(null);
   const [wsReconnects, setWsReconnects] = useState(0);
   const [copied, setCopied] = useState(false);
@@ -104,6 +110,11 @@ export function Diagnostics() {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => setSetupStatus(d))
       .catch(() => setSetupStatus(null));
+
+    fetch("/api/stats")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setFlightStats(d))
+      .catch(() => setFlightStats(null));
   }, []);
 
   // Re-render every 2s so elapsed times stay fresh.
@@ -210,11 +221,14 @@ export function Diagnostics() {
           </Row>
           <Row label="WS reconnects">{wsReconnects}</Row>
           <Row label="Last WS message">{elapsed(lastWsMs)}</Row>
+          <Row label="Last WS error">{state.error ?? "â€”"}</Row>
         </Section>
 
         <Section title="Data">
           <Row label="Data source">{state.status?.source ?? "—"}</Row>
           <Row label="Aircraft received">{state.aircraft.length}</Row>
+          <Row label="Unique aircraft today">{flightStats?.uniqueAircraft ?? "â€”"}</Row>
+          <Row label="Active in flight log">{flightStats?.activeAircraft ?? "â€”"}</Row>
           <Row label="Source status">
             <StatusDot ok={state.status?.ok ?? false} />
             {state.status?.ok ? "ok" : "error"}

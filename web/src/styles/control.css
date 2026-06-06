@@ -430,6 +430,111 @@ main {
   text-align: right;
 }
 
+.follow-flight-btn {
+  display: block;
+  width: calc(100% - 40px);
+  margin: 0 20px 20px;
+  padding: 13px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--text);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.follow-flight-btn.active {
+  border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+}
+
+.follow-banner {
+  margin: 12px auto 0;
+  max-width: 680px;
+  padding: 10px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.follow-banner button {
+  border: none;
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: var(--panel-2);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.nearby-flights {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+}
+
+.nearby-flights-title {
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.nearby-flights-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 6px;
+}
+
+.nearby-flights-list button {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 8px 10px;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.nearby-flights-list span {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.follow-setting-active {
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.follow-setting-idle {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.follow-setting-stop {
+  width: calc(100% - 24px);
+  margin: 8px 12px 14px;
+  padding: 11px 14px;
+  border: 1px solid var(--warn);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 650;
+}
+
 /* ── Location section ─────────────────────────────────────────────────────────── */
 .location-airports {
   padding: 12px 14px;
