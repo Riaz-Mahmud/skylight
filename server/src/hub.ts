@@ -116,16 +116,22 @@ export class Hub {
   broadcastAircraft(now: number, aircraft: Aircraft[]): void {
     const next = new Map<string, string>();
     const upsert: Aircraft[] = [];
+    const alive: string[] = []; // present but unchanged since last broadcast
     for (const ac of aircraft) {
       const { ts: _snapshotTime, ...stableFields } = ac;
       const serialized = JSON.stringify(stableFields);
       next.set(ac.hex, serialized);
-      if (this.aircraftByHex.get(ac.hex) !== serialized) upsert.push(ac);
+      if (this.aircraftByHex.get(ac.hex) !== serialized) {
+        upsert.push(ac);
+      } else {
+        // Aircraft is known and unchanged — just signal it is still alive.
+        alive.push(ac.hex);
+      }
     }
     const remove = [...this.aircraftByHex.keys()].filter((hex) => !next.has(hex));
     this.aircraftByHex = next;
     this.aircraftSeq++;
-    this.broadcast({ type: "aircraftDelta", now, seq: this.aircraftSeq, upsert, remove });
+    this.broadcast({ type: "aircraftDelta", now, seq: this.aircraftSeq, upsert, remove, alive });
   }
   broadcastStatus(status: SourceStatus): void {
     this.broadcast({ type: "status", status });

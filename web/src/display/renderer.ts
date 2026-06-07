@@ -374,6 +374,12 @@ export class Renderer {
           while (trim < tr.history.length - 2 && now - tr.history.at(trim).t > keep) trim++;
           tr.history.drop(trim);
         }
+        // Pre-seed renderedM on first position so draw() has no cold-start snap.
+        // We use the raw lat/lon→meters directly rather than waiting for sampleAt,
+        // which needs the history to have at least one entry (which we just pushed).
+        if (!tr.renderedM) {
+          tr.renderedM = llToMeters(ac.lat!, ac.lon!, cfg.centerLat, cfg.centerLon);
+        }
       }
     }
 
@@ -466,9 +472,14 @@ export class Renderer {
     };
 
     const tt = now - RENDER_DELAY_MS;
+    // motionFactor: how much of the gap to close this frame.
+    // Formula: time-constant approach — closes ~63% of remaining gap per
+    // `tau` seconds. tau = 0.06s at smoothing=0 (near-instant), up to
+    // ~0.5s at smoothing=0.9.  Frame-rate independent.
+    const tau = 0.04 + cfg.smoothing * 0.5;
     const motionFactor = cfg.smoothing <= 0
       ? 1
-      : 1 - Math.pow(cfg.smoothing, Math.max(0.01, frameDt * 60));
+      : 1 - Math.exp(-frameDt / tau);
     const followHex = cfg.followFlightHex.toLowerCase();
     const followed = followHex
       ? this.tracks.get(followHex)
@@ -515,31 +526,38 @@ export class Renderer {
         }
       }
 
-      // Fade in on spawn; fade out as it goes stale.
+      // Fade in on spawn; fade out only when actually estimated/stale.
       let target: number;
       if (memSec > 0) {
-        if (stale < cfg.staleSec * 0.5) {
+        if (!tr.estimated) {
+          // Aircraft is live in the feed — full brightness regardless of age.
           target = 1;
         } else if (stale < memSec) {
-          // Gently dim estimated tracks (still clearly visible).
-          target = 0.65;
+          // Missing from feed but within memory window — visibly dimmed.
+          target = 0.6;
         } else {
-          // Past memory window: fade out over fadeOutSec.
+          // Past memory window — fade out over fadeOutSec.
           const fadeProgress = Math.min(1, (stale - memSec) / Math.max(1, cfg.fadeOutSec));
-          target = (1 - fadeProgress) * 0.65;
+          target = (1 - fadeProgress) * 0.6;
         }
       } else {
-        target = stale > cfg.staleSec * 0.5 ? 0 : 1;
+        // Legacy mode: fade based purely on staleness.
+        target = stale > cfg.staleSec * 0.75 ? 0 : 1;
       }
-      tr.life += (target - tr.life) * Math.min(1, frameDt * 3.5);
+      // Life lerp: use a time-based rate (0.8 of gap per 100ms) so it feels
+      // consistent regardless of frame rate.
+      const lifeRate = Math.min(1, frameDt * 8);
+      tr.life += (target - tr.life) * lifeRate;
 
       if (!tr.hasPos) continue;
       const sampled = this.sampleAt(tr, tt, cfg);
       if (!sampled) continue;
+      // renderedM is pre-seeded in update() on first position fix.
+      // If somehow still undefined (e.g. center changed), seed it now.
       if (!tr.renderedM) tr.renderedM = sampled;
       if (tr !== followed) {
         tr.renderedM = {
-          east: tr.renderedM.east + (sampled.east - tr.renderedM.east) * motionFactor,
+          east:  tr.renderedM.east  + (sampled.east  - tr.renderedM.east)  * motionFactor,
           north: tr.renderedM.north + (sampled.north - tr.renderedM.north) * motionFactor,
         };
       }
@@ -1241,15 +1259,18 @@ export class Renderer {
     const h = v.tr.history;
     if (h.length < 2) return;
 
-    // Build the polyline from real fixes within the window, ending at the head.
+    // Build the polyline from real fixes within the window.
+    // The final point is the smoothed glyph position (v.p) so the trail
+    // always connects flush to the aircraft with no gap or kink.
     const windowMs = cfg.trailSeconds * 1000;
     const pts: { p: Point; age: number }[] = [];
     for (const s of h) {
       if (s.t < tt - windowMs || s.t > tt) continue;
-      // Reproject from absolute lat/lon to current center — trail survives pans.
+      // Reproject from absolute lat/lon to current center — survives pans.
       const m = llToMeters(s.lat, s.lon, cfg.centerLat, cfg.centerLon);
       pts.push({ p: project(this.relativeToFollow(m), proj), age: (tt - s.t) / windowMs });
     }
+    // Anchor the head to the smoothed rendered position.
     pts.push({ p: v.p, age: 0 });
     if (pts.length < 2) return;
 

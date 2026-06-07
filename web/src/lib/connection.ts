@@ -112,6 +112,13 @@ export class Connection {
         }
         for (const hex of msg.remove) this.aircraftByHex.delete(hex);
         for (const ac of msg.upsert) this.aircraftByHex.set(ac.hex, ac);
+        // Refresh ts on unchanged aircraft so the renderer knows they are
+        // still alive — prevents them drifting into the estimated/stale state
+        // just because their position didn't change between polls.
+        for (const hex of msg.alive) {
+          const existing = this.aircraftByHex.get(hex);
+          if (existing) this.aircraftByHex.set(hex, { ...existing, ts: msg.now });
+        }
         this.aircraftSeq = msg.seq;
         this.update({ now: msg.now, aircraft: [...this.aircraftByHex.values()] });
         break;

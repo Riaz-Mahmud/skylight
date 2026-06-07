@@ -22,7 +22,7 @@ export interface SourceStatus {
 export type ServerMessage =
   | { type: "config"; config: Config }
   | { type: "aircraft"; now: number; seq: number; aircraft: Aircraft[] }
-  | { type: "aircraftDelta"; now: number; seq: number; upsert: Aircraft[]; remove: string[] }
+  | { type: "aircraftDelta"; now: number; seq: number; upsert: Aircraft[]; remove: string[]; alive: string[] }
   | { type: "status"; status: SourceStatus }
   | { type: "ack"; requestId: string }
   | { type: "pong" }
