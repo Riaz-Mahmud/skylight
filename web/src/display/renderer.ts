@@ -29,8 +29,9 @@ import { computeSky, type Sky, type Tle } from "./celestial.js";
 import { ASTERISMS } from "./stars.js";
 import { CITIES } from "./cities.js";
 
-/** How far in the past we render, ms. Just over the ~1 Hz fix interval. */
-const RENDER_DELAY_MS = 1150;
+/** How far in the past we render, ms. Starts at 1.15× the default poll cadence
+ *  and is updated at runtime from the server's reported pollMs. */
+const DEFAULT_RENDER_DELAY_MS = 1150;
 
 interface Sample {
   t: number; // performance.now() at arrival
@@ -91,11 +92,26 @@ interface Track {
   hasPos: boolean;
   /** Smoothed appearance alpha (fade in on spawn, out when stale). */
   life: number;
+  /** Separate alpha for labels — lags behind `life` so labels dissolve rather
+   *  than snapping on/off with the glyph. */
+  labelLife: number;
   /** True when the aircraft is no longer in the live feed but still in memory. */
   estimated: boolean;
   /** Number of consecutive update cycles where this aircraft was absent. */
   missingCycles: number;
   renderedM?: Meters;
+  /** Exponentially smoothed heading in radians (screen space). Eliminates
+   *  per-fix rotation jitter caused by quantised ADS-B track values. */
+  renderedHeading?: number;
+  /** Cached llToMeters results for the trail. Avoids recomputing trig every
+   *  frame — only rebuilt when the center or history changes. */
+  trailMeters?: Meters[];
+  /** Key that was used to build trailMeters: "lat:lon:len:lastT". */
+  trailMeterKey?: string;
+  /** performance.now() when an alert pulse was triggered, undefined = none. */
+  alertPulseAt?: number;
+  /** Visual colour of the active alert pulse. */
+  alertPulseKind?: "emergency" | "interesting";
 }
 
 type ProjOpts = Parameters<typeof project>[1];
@@ -137,6 +153,8 @@ interface Visible {
   heading: number;
   rangeMi: number;
   alpha: number;
+  /** Separate alpha for labels, lags behind alpha so labels dissolve smoothly. */
+  labelAlpha: number;
   color: [number, number, number];
   emergency: boolean;
   followed: boolean;
@@ -180,6 +198,9 @@ export class Renderer {
    *  invalidate smoothed renderedM positions on all tracks. */
   private lastCenterLat = NaN;
   private lastCenterLon = NaN;
+  /** How far in the past we render. Updated via setPollMs() when the server
+   *  reports its poll cadence so the delay auto-tunes to any poll rate. */
+  private renderDelayMs = DEFAULT_RENDER_DELAY_MS;
 
   // ── Pan / explore mode ──────────────────────────────────────────────────────
   /** Extra camera offset set by the drag-to-pan gesture (meters, config coords). */
@@ -233,6 +254,19 @@ export class Renderer {
   }
   stop(): void {
     cancelAnimationFrame(this.raf);
+  }
+
+  /** Called when the server reports its poll cadence. Adjusts the render lag
+   *  window so interpolation stays centred between real fixes at any poll rate. */
+  setPollMs(pollMs: number): void {
+    this.renderDelayMs = pollMs * 1.15;
+  }
+
+  /** Must be called from a user-gesture handler (click / keydown) to unlock
+   *  the Web Audio context. Safe to call multiple times. */
+  initAudio(): void {
+    if (!this.audioCtx) this.audioCtx = new AudioContext();
+    else if (this.audioCtx.state === "suspended") void this.audioCtx.resume();
   }
 
   /** Live stats for the HUD and diagnostics page. */
@@ -354,6 +388,7 @@ export class Renderer {
           lastSeen: now,
           hasPos,
           life: 0,
+          labelLife: 0,
           estimated: false,
           missingCycles: 0,
         };
@@ -369,7 +404,10 @@ export class Renderer {
         // Dedup identical fixes (source sometimes repeats a position).
         if (!last || last.lat !== ac.lat || last.lon !== ac.lon) {
           tr.history.push({ t: now, lat: ac.lat!, lon: ac.lon!, track: ac.track, gs: ac.gs });
-          const keep = Math.max(cfg.trailSeconds, 6) * 1000 + 4000;
+          // Keep the full flight path for the followed aircraft (up to buffer
+          // capacity); everyone else is trimmed to the trail window.
+          const isFollowed = hex === cfg.followFlightHex.toLowerCase();
+          const keep = isFollowed ? Infinity : Math.max(cfg.trailSeconds, 6) * 1000 + 4000;
           let trim = 0;
           while (trim < tr.history.length - 2 && now - tr.history.at(trim).t > keep) trim++;
           tr.history.drop(trim);
@@ -423,19 +461,19 @@ export class Renderer {
       const m = toM(lastS);
       return cfg.interpolate ? deadReckon(m, lastS.track, lastS.gs, dt) : m;
     }
-    // Find the bracketing pair and interpolate.
-    for (let i = h.length - 1; i > 0; i--) {
-      if (h.at(i - 1).t <= tt && tt <= h.at(i).t) {
-        const a = toM(h.at(i - 1));
-        const b = toM(h.at(i));
-        const f = (tt - h.at(i - 1).t) / Math.max(1, h.at(i).t - h.at(i - 1).t);
-        return {
-          east:  a.east  + (b.east  - a.east)  * f,
-          north: a.north + (b.north - a.north) * f,
-        };
-      }
+    // Binary search for the bracketing pair, then interpolate.
+    let lo = 0, hi = h.length - 1;
+    while (lo < hi - 1) {
+      const mid = (lo + hi) >> 1;
+      if (h.at(mid).t <= tt) lo = mid; else hi = mid;
     }
-    return toM(lastS);
+    const a = toM(h.at(lo));
+    const b = toM(h.at(hi));
+    const f = (tt - h.at(lo).t) / Math.max(1, h.at(hi).t - h.at(lo).t);
+    return {
+      east:  a.east  + (b.east  - a.east)  * f,
+      north: a.north + (b.north - a.north) * f,
+    };
   }
 
   private draw(): void {
@@ -471,7 +509,7 @@ export class Renderer {
       screenH: this.h,
     };
 
-    const tt = now - RENDER_DELAY_MS;
+    const tt = now - this.renderDelayMs;
     // motionFactor: how much of the gap to close this frame.
     // Formula: time-constant approach — closes ~63% of remaining gap per
     // `tau` seconds. tau = 0.06s at smoothing=0 (near-instant), up to
@@ -516,12 +554,14 @@ export class Renderer {
       if (memSec > 0) {
         if (stale > cfg.hideOnlyAfterSec) {
           this.tracks.delete(hex);
+          this.alertedHexes.delete(hex);
           continue;
         }
       } else {
         // Legacy behaviour: drop after staleSec.
         if (stale > cfg.staleSec) {
           this.tracks.delete(hex);
+          this.alertedHexes.delete(hex);
           continue;
         }
       }
@@ -548,6 +588,9 @@ export class Renderer {
       // consistent regardless of frame rate.
       const lifeRate = Math.min(1, frameDt * 8);
       tr.life += (target - tr.life) * lifeRate;
+      // labelLife lags at half the rate so labels dissolve rather than snap.
+      const labelRate = Math.min(1, frameDt * 4);
+      tr.labelLife += (tr.life - tr.labelLife) * labelRate;
 
       if (!tr.hasPos) continue;
       const sampled = this.sampleAt(tr, tt, cfg);
@@ -568,12 +611,26 @@ export class Renderer {
       if (rangeMi > cfg.radiusMiles * 1.08) continue;
 
       const p = project(relativeM, proj);
-      const heading = this.screenHeading(tr, tt, proj);
+      const heading = this.screenHeading(tr, tt, cfg, proj, frameDt);
       const edgeFade = clamp01((cfg.radiusMiles - rangeMi) / (cfg.radiusMiles * 0.14));
       const alpha = clamp01(edgeFade) * tr.life * cfg.brightness;
+      const labelAlpha = clamp01(edgeFade) * tr.labelLife * cfg.brightness;
       const alt = tr.ac.altBaro ?? tr.ac.altGeom ?? 0;
       const color = cfg.altitudeColor ? altRamp(alt) : hexToRgb(cfg.palette.glyph);
       const emergency = cfg.highlightEmergency && !!tr.ac.squawk && EMERGENCY_SQUAWKS.has(tr.ac.squawk);
+
+      // ── Alert detection (fires once per hex per session) ──────────────────
+      if (!this.alertedHexes.has(hex)) {
+        const hasEmergency = !!tr.ac.squawk && EMERGENCY_SQUAWKS.has(tr.ac.squawk);
+        const isInteresting = cfg.alertInteresting && this.classifyInteresting(tr.ac);
+        if (hasEmergency || isInteresting) {
+          this.alertedHexes.add(hex);
+          tr.alertPulseAt = now;
+          tr.alertPulseKind = hasEmergency ? "emergency" : "interesting";
+          if (cfg.alertSounds && hasEmergency) this.playAlertSound("emergency");
+          else if (cfg.alertSounds && isInteresting) this.playAlertSound("interesting");
+        }
+      }
 
       visible.push({
         tr,
@@ -582,6 +639,7 @@ export class Renderer {
         heading,
         rangeMi,
         alpha,
+        labelAlpha,
         color,
         emergency,
         followed: tr === followed,
@@ -601,6 +659,8 @@ export class Renderer {
     // Trails + glyphs for everyone.
     if (cfg.showDestArc) for (const v of visible) this.drawDestArc(cfg, proj, v);
     for (const v of visible) this.drawTrail(cfg, proj, v, tt);
+    if (cfg.showSpeedVectors) for (const v of visible) this.drawSpeedVector(cfg, proj, v);
+    for (const v of visible) this.drawAlertPulse(v, now);
     for (const v of visible) this.drawGlyph(cfg, v);
 
     // Labels: nearest are at the END after the sort.
@@ -636,9 +696,31 @@ export class Renderer {
     ctx.restore();
   }
 
-  private screenHeading(tr: Track, tt: number, proj: ProjOpts): number {
-    const a = this.sampleAt(tr, tt - 400, this.getConfig());
-    const b = this.sampleAt(tr, tt + 400, this.getConfig());
+  private screenHeading(tr: Track, tt: number, cfg: Config, proj: ProjOpts, frameDt: number): number {
+    // Narrow window: ±150 ms straddles a single fix interval at 1 Hz without
+    // reaching back into the previous segment (which ±400 ms could do).
+    const raw = this.computeRawHeading(tr, tt, cfg, proj);
+
+    // Smooth heading with a short time constant (tau ~120 ms) so per-fix
+    // quantisation jitter (~5° ADS-B steps) is absorbed without lag.
+    // Uses actual frameDt so the rate is identical at 30 fps and 60 fps.
+    if (tr.renderedHeading === undefined) {
+      tr.renderedHeading = raw;
+    } else {
+      // Shortest-arc interpolation — avoids spinning through 360° on wrap.
+      let delta = raw - tr.renderedHeading;
+      if (delta > Math.PI)  delta -= 2 * Math.PI;
+      if (delta < -Math.PI) delta += 2 * Math.PI;
+      const headingTau = 0.12;
+      const headingFactor = 1 - Math.exp(-frameDt / headingTau);
+      tr.renderedHeading += delta * headingFactor;
+    }
+    return tr.renderedHeading;
+  }
+
+  private computeRawHeading(tr: Track, tt: number, cfg: Config, proj: ProjOpts): number {
+    const a = this.sampleAt(tr, tt - 150, cfg);
+    const b = this.sampleAt(tr, tt + 150, cfg);
     if (a && b) {
       const pa = project(a, proj);
       const pb = project(b, proj);
@@ -647,14 +729,14 @@ export class Renderer {
       }
     }
     // Fallback: use reported track through the projection.
-    const m = this.sampleAt(tr, tt, this.getConfig());
+    const m = this.sampleAt(tr, tt, cfg);
     if (m && tr.ac.track != null) {
       const ahead = deadReckon(m, tr.ac.track, 120, 1);
       const p0 = project(m, proj);
       const p1 = project(ahead, proj);
       return Math.atan2(p1.y - p0.y, p1.x - p0.x);
     }
-    return 0;
+    return tr.renderedHeading ?? 0;
   }
 
   // --- overlays: whisper-quiet rings + compass ---
@@ -822,31 +904,6 @@ export class Renderer {
   private drawFollowContext(cfg: Config, proj: ProjOpts): void {
     const ctx = this.ctx;
     const radiusM = cfg.radiusMiles * 1609.344;
-    const gridM = Math.max(1609.344, Math.pow(2, Math.round(Math.log2(radiusM / 4))));
-    const startEast = Math.floor((this.followOffset.east - radiusM) / gridM) * gridM;
-    const startNorth = Math.floor((this.followOffset.north - radiusM) / gridM) * gridM;
-
-    ctx.save();
-    ctx.strokeStyle = rgba(hexToRgb(cfg.palette.grid), 0.12 * cfg.brightness);
-    ctx.lineWidth = 1;
-    ctx.setLineDash([2, 8]);
-    for (let east = startEast; east <= this.followOffset.east + radiusM; east += gridM) {
-      const a = project(this.relativeToFollow({ east, north: this.followOffset.north - radiusM }), proj);
-      const b = project(this.relativeToFollow({ east, north: this.followOffset.north + radiusM }), proj);
-      ctx.beginPath();
-      ctx.moveTo(a.x, a.y);
-      ctx.lineTo(b.x, b.y);
-      ctx.stroke();
-    }
-    for (let north = startNorth; north <= this.followOffset.north + radiusM; north += gridM) {
-      const a = project(this.relativeToFollow({ east: this.followOffset.east - radiusM, north }), proj);
-      const b = project(this.relativeToFollow({ east: this.followOffset.east + radiusM, north }), proj);
-      ctx.beginPath();
-      ctx.moveTo(a.x, a.y);
-      ctx.lineTo(b.x, b.y);
-      ctx.stroke();
-    }
-    ctx.restore();
 
     let nearestCity: { name: string; distanceM: number } | null = null;
     for (const city of CITIES) {
@@ -1009,23 +1066,32 @@ export class Renderer {
     };
   }
 
+  /** Remaining time (seconds) of the fast-seek spring after a new follow target
+   *  is selected. Higher omega during this window gives a smooth accelerating
+   *  ease-in rather than an instant teleport. */
+  private followSeekTimer = 0;
+
+  // ── Alerts ───────────────────────────────────────────────────────────────────
+  /** Hexes that have already triggered an alert this session (dedup). */
+  private alertedHexes = new Set<string>();
+  /** Web Audio context, created lazily on first user gesture. */
+  private audioCtx: AudioContext | null = null;
+
   private updateFollowCamera(hex: string, target: Meters | undefined, frameDt: number): void {
     if (hex !== this.activeFollowHex) {
       this.activeFollowHex = hex;
       this.followVelocity = { east: 0, north: 0 };
-      // A restored or newly selected target may already be outside the home
-      // viewport. Lock onto it immediately so it cannot be clipped while the
-      // camera eases across a large distance; subsequent movement stays smooth.
-      if (hex && target) {
-        this.followOffset = { ...target };
-        return;
-      }
+      // Start a fast-seek window so the camera eases to the new target quickly
+      // but smoothly, instead of snapping instantly.
+      this.followSeekTimer = hex ? 0.8 : 0;
     }
     const destination = hex ? target : { east: 0, north: 0 };
     if (!destination) return;
 
     const dt = Math.min(frameDt, 0.05);
-    const omega = 4.5;
+    // Use a stiffer spring during the seek window for a fast-but-smooth lock-on.
+    this.followSeekTimer = Math.max(0, this.followSeekTimer - frameDt);
+    const omega = this.followSeekTimer > 0 ? 12 : 4.5;
     const updateAxis = (position: number, velocity: number, destination: number): [number, number] => {
       const acceleration = omega * omega * (destination - position) - 2 * omega * velocity;
       const nextVelocity = velocity + acceleration * dt;
@@ -1068,12 +1134,14 @@ export class Renderer {
     });
   }
 
-  /** Place an (azimuth, altitude) sky point on the field. Zenith=center, horizon=edge. */
+  /** Place an (azimuth, altitude) sky point on the field. Zenith=center, horizon=edge.
+   *  Applies relativeToFollow so the sky shifts correctly in follow/pan mode. */
   private projectSky(az: number, alt: number, cfg: Config, proj: ProjOpts): Point {
     const R = cfg.radiusMiles * 1609.34;
     const r = (1 - Math.max(0, alt) / 90) * R;
     const a = (az * Math.PI) / 180;
-    return project({ east: Math.sin(a) * r, north: Math.cos(a) * r }, proj);
+    const m: Meters = { east: Math.sin(a) * r, north: Math.cos(a) * r };
+    return project(this.relativeToFollow(m), proj);
   }
 
   private drawSky(cfg: Config, proj: ProjOpts): void {
@@ -1259,16 +1327,53 @@ export class Renderer {
     const h = v.tr.history;
     if (h.length < 2) return;
 
-    // Build the polyline from real fixes within the window.
-    // The final point is the smoothed glyph position (v.p) so the trail
-    // always connects flush to the aircraft with no gap or kink.
+    // Cache llToMeters results — the expensive trig — keyed by center + history
+    // state. Only rebuilt when the center moves or a new fix arrives; between
+    // those events just reprojects the cached Meters[] (cheap linear math).
+    const lastT = h.at(h.length - 1).t;
+    const mKey = `${cfg.centerLat}:${cfg.centerLon}:${h.length}:${lastT}`;
+    if (v.tr.trailMeterKey !== mKey) {
+      const meters: Meters[] = [];
+      for (const s of h) meters.push(llToMeters(s.lat, s.lon, cfg.centerLat, cfg.centerLon));
+      v.tr.trailMeters = meters;
+      v.tr.trailMeterKey = mKey;
+    }
+    const cachedM = v.tr.trailMeters!;
+
+    // For the followed aircraft draw the full historical path (everything older
+    // than trailSeconds) as a dim dashed line first, then paint the comet on top.
     const windowMs = cfg.trailSeconds * 1000;
+    if (v.followed && h.length >= 2) {
+      const histPts: Point[] = [];
+      for (let i = 0; i < h.length; i++) {
+        const s = h.at(i);
+        if (s.t > tt - windowMs) {
+          // Bridge into the comet window so there's no gap.
+          histPts.push(project(this.relativeToFollow(cachedM[i]), proj));
+          break;
+        }
+        histPts.push(project(this.relativeToFollow(cachedM[i]), proj));
+      }
+      if (histPts.length >= 2) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(histPts[0].x, histPts[0].y);
+        for (const p of histPts.slice(1)) ctx.lineTo(p.x, p.y);
+        ctx.strokeStyle = rgba(v.color, 0.22 * v.alpha);
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 7]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+    }
+
+    // Build screen points from cached meters — project + relativeToFollow each frame.
     const pts: { p: Point; age: number }[] = [];
-    for (const s of h) {
+    for (let i = 0; i < h.length; i++) {
+      const s = h.at(i);
       if (s.t < tt - windowMs || s.t > tt) continue;
-      // Reproject from absolute lat/lon to current center — survives pans.
-      const m = llToMeters(s.lat, s.lon, cfg.centerLat, cfg.centerLon);
-      pts.push({ p: project(this.relativeToFollow(m), proj), age: (tt - s.t) / windowMs });
+      pts.push({ p: project(this.relativeToFollow(cachedM[i]), proj), age: (tt - s.t) / windowMs });
     }
     // Anchor the head to the smoothed rendered position.
     pts.push({ p: v.p, age: 0 });
@@ -1291,6 +1396,96 @@ export class Renderer {
     ctx.restore();
   }
 
+  // --- speed vector: lookahead line ---
+  private drawSpeedVector(cfg: Config, proj: ProjOpts, v: Visible): void {
+    const ac = v.tr.ac;
+    if (!ac.gs || ac.gs < 30 || ac.track == null || !v.tr.renderedM) return;
+    const dt = cfg.speedVectorMinutes * 60;
+    const aheadAbs = deadReckon(v.tr.renderedM, ac.track, ac.gs, dt);
+    const aheadP = project(this.relativeToFollow(aheadAbs), proj);
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(v.p.x, v.p.y);
+    ctx.lineTo(aheadP.x, aheadP.y);
+    ctx.strokeStyle = rgba(v.color, 0.45 * v.alpha);
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 5]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  // --- alert pulse: expanding ring on first detection ---
+  private drawAlertPulse(v: Visible, now: number): void {
+    const tr = v.tr;
+    if (tr.alertPulseAt === undefined) return;
+    const age = (now - tr.alertPulseAt) / 1000;
+    const duration = 1.8;
+    if (age > duration) { tr.alertPulseAt = undefined; return; }
+    const pulseColor = tr.alertPulseKind === "emergency"
+      ? hexToRgb("#FF5A47")
+      : hexToRgb("#9B7ECF");
+    const s = (this.getConfig().glyphSizePx) * GLYPH_SCALE[classifyGlyph(tr.ac)];
+    const t = age / duration;
+    // Two rings at different phases for a ripple effect.
+    for (const offset of [0, 0.35]) {
+      const phase = (t + offset) % 1;
+      const r = s * (1.8 + phase * 5);
+      const a = (1 - phase) * 0.7 * v.alpha;
+      if (a < 0.01) continue;
+      this.ctx.beginPath();
+      this.ctx.arc(v.p.x, v.p.y, r, 0, Math.PI * 2);
+      this.ctx.strokeStyle = rgba(pulseColor, a);
+      this.ctx.lineWidth = 1.5;
+      this.ctx.stroke();
+    }
+  }
+
+  // --- alert helpers ---
+  private readonly MILITARY_PREFIXES = [
+    "RCH", "RRR", "SAM", "REACH", "GHOST", "SPAR", "DUKE", "JAKE", "STEEL",
+    "VENUS", "ARISE", "KNIFE", "HOMER", "ROCKY", "TROLL",
+  ];
+  private readonly MILITARY_TYPES = new Set([
+    "F16", "F15", "F18", "F22", "F35", "B52", "B1", "B2",
+    "C130", "C17", "C5", "E3TF", "E8", "KC135", "KC10", "P8",
+    "U2", "A10", "V22", "MQ9", "RQ4", "RC135", "EC130",
+  ]);
+
+  private classifyInteresting(ac: Aircraft): boolean {
+    const flight = (ac.flight ?? "").toUpperCase().replace(/\s/g, "");
+    if (this.MILITARY_PREFIXES.some((p) => flight.startsWith(p))) return true;
+    const type = (ac.typeCode ?? "").toUpperCase();
+    if (type && this.MILITARY_TYPES.has(type)) return true;
+    return false;
+  }
+
+  private playAlertSound(kind: "emergency" | "interesting"): void {
+    const ctx = this.audioCtx;
+    if (!ctx) return;
+    // Emergency: three descending tones. Interesting: two softer ascending tones.
+    const tones = kind === "emergency"
+      ? [{ f: 1100, t: 0 }, { f: 880, t: 0.18 }, { f: 660, t: 0.36 }]
+      : [{ f: 660, t: 0 }, { f: 880, t: 0.20 }];
+    const gain = kind === "emergency" ? 0.14 : 0.09;
+    for (const { f, t } of tones) {
+      const osc = ctx.createOscillator();
+      const env = ctx.createGain();
+      osc.connect(env);
+      env.connect(ctx.destination);
+      osc.type = "sine";
+      osc.frequency.value = f;
+      const start = ctx.currentTime + 0.05 + t;
+      env.gain.setValueAtTime(0, start);
+      env.gain.linearRampToValueAtTime(gain, start + 0.02);
+      env.gain.setValueAtTime(gain, start + 0.10);
+      env.gain.linearRampToValueAtTime(0, start + 0.16);
+      osc.start(start);
+      osc.stop(start + 0.18);
+    }
+  }
+
   // --- glyph: type-aware luminous silhouette ---
   private drawGlyph(cfg: Config, v: Visible): void {
     const ctx = this.ctx;
@@ -1302,14 +1497,17 @@ export class Renderer {
     ctx.translate(v.p.x, v.p.y);
     ctx.rotate(v.heading + Math.PI / 2);
 
-    // Soft halo — restrained so the silhouette reads as an aircraft.
-    const halo = ctx.createRadialGradient(0, 0, 0, 0, 0, s * 1.7);
-    halo.addColorStop(0, rgba(color, 0.16 * v.alpha));
-    halo.addColorStop(1, rgba(color, 0));
-    ctx.fillStyle = halo;
-    ctx.beginPath();
-    ctx.arc(0, 0, s * 1.7, 0, Math.PI * 2);
-    ctx.fill();
+    // Soft halo — suppressed for the followed aircraft (the dashed ring serves
+    // as its indicator; the halo would create a distracting inner glow circle).
+    if (!v.followed) {
+      const halo = ctx.createRadialGradient(0, 0, 0, 0, 0, s * 1.7);
+      halo.addColorStop(0, rgba(color, 0.16 * v.alpha));
+      halo.addColorStop(1, rgba(color, 0));
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.arc(0, 0, s * 1.7, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
     if (v.followed) {
       ctx.strokeStyle = rgba(color, 0.75 * v.alpha);
@@ -1318,6 +1516,7 @@ export class Renderer {
       ctx.beginPath();
       ctx.arc(0, 0, s * 2.15, 0, Math.PI * 2);
       ctx.stroke();
+      ctx.setLineDash([]);
     }
 
     drawAircraftGlyph(ctx, kind, s, color, v.alpha, this.frameT, hexSeed(v.tr.ac.hex));
@@ -1439,7 +1638,7 @@ export class Renderer {
     const ctx = this.ctx;
     const lines = this.labelLines(cfg, v.tr.ac);
     if (!lines.length) return;
-    const a = v.alpha * strength;
+    const a = v.labelAlpha * strength;
     if (a < 0.04) return;
 
     const { w, lh, h } = this.measureLabel(cfg, lines);

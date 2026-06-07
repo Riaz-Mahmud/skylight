@@ -34,7 +34,6 @@ export function Display() {
   const [rendererStats, setRendererStats] = useState({ total: 0, estimated: 0, stale: 0 });
   const [rendererError, setRendererError] = useState<string | null>(null);
   const [selectedHit, setSelectedHit] = useState<AircraftHit | null>(null);
-  const [isDragging, setIsDragging] = useState(false);
 
   // connRef lets closures in the renderer useEffect (empty deps) always reach
   // the latest conn without going stale.
@@ -89,6 +88,11 @@ export function Display() {
     const onResize = () => r.resize();
     window.addEventListener("resize", onResize);
 
+    // Unlock Web Audio on the first user gesture so alert sounds can play.
+    const unlockAudio = () => r.initAudio();
+    window.addEventListener("pointerdown", unlockAudio, { once: true });
+    window.addEventListener("keydown",     unlockAudio, { once: true });
+
     // ── Mouse wheel zoom — attached here where canvas is guaranteed valid ──
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
@@ -142,6 +146,12 @@ export function Display() {
     rendererRef.current?.update(state.aircraft);
   }, [state.now, state.aircraft]);
 
+  // Self-tune render delay from server poll cadence.
+  useEffect(() => {
+    const pollMs = state.status?.pollMs;
+    if (pollMs && pollMs > 0) rendererRef.current?.setPollMs(pollMs);
+  }, [state.status?.pollMs]);
+
   // Keep popover anchor live while aircraft is selected.
   useEffect(() => {
     if (!selectedHit) return;
@@ -178,7 +188,7 @@ export function Display() {
         const { centerLat, centerLon } = r.getPannedCenter();
         connRef.current.patchConfig({ centerLat, centerLon });
         r.resetPan();
-        setIsDragging(false);
+        canvasRef.current?.classList.remove("dragging");
         return;
       }
       r.applyPanDelta(d.velX, d.velY);
@@ -227,7 +237,7 @@ export function Display() {
 
       rendererRef.current?.applyPanDelta(dx, dy);
 
-      if (d.movedPx > DRAG_THRESHOLD_PX) setIsDragging(true);
+      if (d.movedPx > DRAG_THRESHOLD_PX) canvasRef.current?.classList.add("dragging");
     };
 
     const onMouseUp = (e: MouseEvent) => {
@@ -239,7 +249,7 @@ export function Display() {
       if (d.movedPx <= DRAG_THRESHOLD_PX) {
         // It was a click — do aircraft hit test.
         rendererRef.current?.resetPan();
-        setIsDragging(false);
+        canvasRef.current?.classList.remove("dragging");
         setSelectedHit(
           rendererRef.current?.hitTest(e.clientX, e.clientY) ?? null,
         );
@@ -265,7 +275,20 @@ export function Display() {
     const el = canvasRef.current;
     if (!el) return;
 
+    // Pinch state — tracked separately from the pan drag.
+    let pinchDist = 0; // initial finger separation
+
     const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        // Two fingers: start a pinch-to-zoom gesture.
+        stopInertia();
+        rendererRef.current?.resetPan();
+        drag.current.active = false;
+        const t0 = e.touches[0];
+        const t1 = e.touches[1];
+        pinchDist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+        return;
+      }
       if (e.touches.length !== 1) return;
       stopInertia();
       rendererRef.current?.resetPan();
@@ -283,6 +306,29 @@ export function Display() {
     };
 
     const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        const t0 = e.touches[0];
+        const t1 = e.touches[1];
+        const newDist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+        if (pinchDist > 0) {
+          const scale = pinchDist / newDist; // >1 = fingers closer = zoom in
+          const base = wheelRadius.current ?? configRef.current.radiusMiles;
+          const next = Math.max(0.5, Math.min(250, base * scale));
+          wheelRadius.current = next;
+          if (wheelTimer.current) clearTimeout(wheelTimer.current);
+          wheelTimer.current = setTimeout(() => {
+            if (wheelRadius.current !== null) {
+              const rounded = Math.round(wheelRadius.current * 10) / 10;
+              connRef.current?.patchConfig({ radiusMiles: rounded });
+              wheelRadius.current = null;
+            }
+            wheelTimer.current = null;
+          }, WHEEL_COMMIT_DELAY);
+        }
+        pinchDist = newDist;
+        return;
+      }
       if (e.touches.length !== 1) return;
       const d = drag.current;
       if (!d.active) return;
@@ -302,17 +348,18 @@ export function Display() {
       d.lastTime = now;
 
       rendererRef.current?.applyPanDelta(dx, dy);
-      if (d.movedPx > DRAG_THRESHOLD_PX) setIsDragging(true);
+      if (d.movedPx > DRAG_THRESHOLD_PX) canvasRef.current?.classList.add("dragging");
     };
 
     const onTouchEnd = (e: TouchEvent) => {
+      pinchDist = 0;
       const d = drag.current;
       if (!d.active) return;
       d.active = false;
 
       if (d.movedPx <= DRAG_THRESHOLD_PX) {
         rendererRef.current?.resetPan();
-        setIsDragging(false);
+        canvasRef.current?.classList.remove("dragging");
         if (e.changedTouches.length) {
           const t = e.changedTouches[0];
           setSelectedHit(
@@ -345,7 +392,7 @@ export function Display() {
         case "Escape":
           stopInertia();
           rendererRef.current?.resetPan();
-          setIsDragging(false);
+          canvasRef.current?.classList.remove("dragging");
           setSelectedHit(null);
           break;
         case "r":
@@ -353,6 +400,12 @@ export function Display() {
           break;
         case "R":
           connRef.current.patchConfig({ rotationDeg: (c.rotationDeg - 5 + 360) % 360 });
+          break;
+        case "0":
+          connRef.current.patchConfig({ rotationDeg: 0 });
+          break;
+        case "v":
+          connRef.current.patchConfig({ showSpeedVectors: !c.showSpeedVectors });
           break;
         case "m":
           connRef.current.patchConfig({ mirrorX: !c.mirrorX });
@@ -418,12 +471,11 @@ export function Display() {
     <div className="display-root">
       <canvas
         ref={canvasRef}
-        className={`display-canvas${isDragging ? " dragging" : ""}`}
+        className="display-canvas"
       />
 
       {cfg?.followFlightHex && (
         <>
-          <div className="follow-reticle" aria-hidden="true" />
           <div className="follow-status">
             <span>TRACKING</span>
             {state.aircraft.find(

@@ -599,3 +599,112 @@ main {
   cursor: pointer;
   white-space: nowrap;
 }
+
+/* ── Flight search ─────────────────────────────────────────────────────────── */
+.follow-search-wrap {
+  padding: 10px 14px 4px;
+}
+.flight-search {
+  position: relative;
+}
+.flight-search-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.flight-search-input {
+  padding-right: 36px;
+}
+.flight-search-clear {
+  position: absolute;
+  right: 10px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 4px;
+  line-height: 1;
+}
+.flight-search-clear:hover {
+  color: var(--text);
+}
+.flight-search-results {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--panel-2);
+}
+.flight-search-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  background: none;
+  border: none;
+  border-top: 1px solid var(--line);
+  color: var(--text);
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: 14px;
+}
+.flight-search-results li:first-child .flight-search-item {
+  border-top: none;
+}
+.flight-search-item:hover {
+  background: var(--panel-1);
+}
+.flight-search-item.active {
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel-2));
+}
+.flight-search-callsign {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 15px;
+  min-width: 80px;
+}
+.flight-search-meta {
+  color: var(--muted);
+  font-size: 12px;
+  flex: 1;
+}
+.flight-search-badge {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-family: var(--mono);
+}
+.flight-search-empty {
+  padding: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+.flight-search-section {
+  padding: 7px 12px 5px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel-2));
+  pointer-events: none;
+}
+.flight-search-spinner {
+  position: absolute;
+  right: 12px;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

@@ -53,8 +53,8 @@ function normalize(raw: RawAircraft, ts: number): Aircraft | null {
 /** Airplanes.live radius is nautical miles; SkyLight config uses statute miles. */
 const NM_PER_MILE = 0.868976;
 
-async function fetchJson(url: string): Promise<any> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+async function fetchJson(url: string, timeoutMs: number): Promise<any> {
+  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -169,9 +169,12 @@ export class Poller {
   }
 
   private async fetchList(source: DataSource, now: number): Promise<Aircraft[] | null> {
+    // Timeout = 80% of poll interval, capped at 4 s. Prevents fetch pile-up
+    // when the source is slow (e.g. Pi SDR under load).
+    const timeoutMs = Math.min(4000, this.o.pollMs * 0.8);
     try {
       const url = source === "radio" ? this.o.radioUrl : this.buildApiUrl();
-      const json = await fetchJson(url);
+      const json = await fetchJson(url, timeoutMs);
       const payload = json.aircraft ?? json.ac;
       if (!Array.isArray(payload)) throw new Error("malformed aircraft payload");
       const rawList: RawAircraft[] = payload;
@@ -257,6 +260,7 @@ export class Poller {
         ok: true,
         count: merged.length,
         lastOk: now,
+        pollMs: this.o.pollMs,
         message: supplement ? `radio + ${this.lastApi.length} via API` : undefined,
       };
       this.o.onSnapshot(now, merged);
@@ -345,5 +349,45 @@ export class Poller {
     for (const [hex, s] of this.sticky) {
       if (now - s.lastSeen > 600_000) this.sticky.delete(hex);
     }
+  }
+
+  /**
+   * Search for a flight by callsign worldwide.
+   * Queries adsb.lol and adsb.fi in parallel (both free, no auth, same readsb
+   * JSON schema) then deduplicates by hex. adsb.fi has better Asia/Pacific
+   * coverage; adsb.lol is stronger in Europe and North America.
+   */
+  async searchByCallsign(q: string): Promise<Aircraft[]> {
+    const callsign = encodeURIComponent(q.toUpperCase());
+    const sources = [
+      `https://api.adsb.lol/v2/callsign/${callsign}`,
+      `https://opendata.adsb.fi/api/v2/callsign/${callsign}`,
+    ];
+    const now = Date.now();
+    const results = await Promise.allSettled(sources.map((url) => fetchJson(url, 5000)));
+    const byHex = new Map<string, Aircraft>();
+    for (const result of results) {
+      if (result.status !== "fulfilled") continue;
+      const payload: RawAircraft[] = result.value.aircraft ?? result.value.ac ?? [];
+      for (const raw of payload) {
+        const ac = normalize(raw, now);
+        if (!ac || byHex.has(ac.hex)) continue;
+        ac.typeName = lookupType(ac.typeCode);
+        ac.airline = lookupAirline(ac.flight);
+        const e = this.o.enricher.enrichSync(ac.hex, ac.flight, now);
+        if (e.route) {
+          ac.airline = ac.airline ?? e.route.airline;
+          ac.origin = e.route.origin;
+          ac.destination = e.route.destination;
+        }
+        byHex.set(ac.hex, ac);
+      }
+    }
+    return [...byHex.values()].slice(0, 10);
+  }
+
+  /** Pre-seed the follow target position so the next API poll centres there. */
+  seedFollowPosition(lat: number, lon: number): void {
+    this.followTargetPosition = { lat, lon };
   }
 }

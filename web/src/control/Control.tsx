@@ -247,6 +247,132 @@ function FlightDetailPopup({
   );
 }
 
+/** Flight number search — filters live aircraft feed, falls back to worldwide API search. */
+function FlightSearch({
+  aircraft,
+  cfg,
+  onFollow,
+}: {
+  aircraft: Aircraft[];
+  cfg: Config;
+  onFollow: (hex: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [remoteResults, setRemoteResults] = useState<Aircraft[]>([]);
+  const [searching, setSearching] = useState(false);
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const norm = (s: string) => s.replace(/\s+/g, "").toUpperCase();
+
+  const localResults = useMemo(() => {
+    const q = norm(query);
+    if (q.length < 2) return [];
+    return aircraft
+      .filter((ac) => norm(ac.flight ?? "").includes(q) || ac.hex.toUpperCase().includes(q))
+      .slice(0, 8);
+  }, [aircraft, query]);
+
+  // Worldwide fallback: query the server when there are no local hits.
+  useEffect(() => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    const q = norm(query);
+    if (q.length < 3 || localResults.length > 0) {
+      setRemoteResults([]);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    searchTimer.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+        if (res.ok) {
+          const data = await res.json() as { aircraft: Aircraft[] };
+          setRemoteResults(data.aircraft ?? []);
+        }
+      } catch {
+        // network error — stay silent
+      } finally {
+        setSearching(false);
+      }
+    }, 400);
+    return () => { if (searchTimer.current) clearTimeout(searchTimer.current); };
+  }, [query, localResults.length]);
+
+  const handleSelect = (ac: Aircraft) => {
+    onFollow(ac.hex.toLowerCase());
+    setQuery("");
+    setRemoteResults([]);
+    inputRef.current?.blur();
+  };
+
+  const clear = () => {
+    setQuery("");
+    setRemoteResults([]);
+    inputRef.current?.focus();
+  };
+
+  const results = localResults.length > 0 ? localResults : remoteResults;
+  const isWorldwide = localResults.length === 0 && remoteResults.length > 0;
+
+  return (
+    <div className="flight-search">
+      <div className="flight-search-wrap">
+        <input
+          ref={inputRef}
+          className="location-input flight-search-input"
+          type="text"
+          placeholder="Search flight number…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="characters"
+          spellCheck={false}
+        />
+        {searching && <span className="flight-search-spinner" />}
+        {query && !searching && (
+          <button className="flight-search-clear" onClick={clear} aria-label="Clear">✕</button>
+        )}
+      </div>
+      {query.length >= 2 && !searching && (
+        <ul className="flight-search-results">
+          {isWorldwide && (
+            <li className="flight-search-section">Worldwide — not yet in range</li>
+          )}
+          {results.length === 0 ? (
+            <li className="flight-search-empty">No matching flights found</li>
+          ) : (
+            results.map((ac) => {
+              const following = cfg.followFlightHex.toLowerCase() === ac.hex.toLowerCase();
+              const dist =
+                ac.lat != null && ac.lon != null
+                  ? distanceMiles(cfg.centerLat, cfg.centerLon, ac.lat, ac.lon).toFixed(0) + " mi away"
+                  : null;
+              return (
+                <li key={ac.hex}>
+                  <button
+                    className={`flight-search-item ${following ? "active" : ""}`}
+                    onClick={() => handleSelect(ac)}
+                  >
+                    <span className="flight-search-callsign">
+                      {ac.flight ?? ac.hex.toUpperCase()}
+                    </span>
+                    <span className="flight-search-meta">
+                      {[ac.typeName ?? ac.typeCode, dist].filter(Boolean).join(" · ")}
+                    </span>
+                    {following && <span className="flight-search-badge">Following</span>}
+                  </button>
+                </li>
+              );
+            })
+          )}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 /** Location section: city search + airport quick-picks + manual lat/lon. */
 function LocationSection({
   cfg,
@@ -514,6 +640,13 @@ export function Control() {
         </div>
 
         <Section title="Follow flight">
+          <div className="follow-search-wrap">
+            <FlightSearch
+              aircraft={state.aircraft}
+              cfg={cfg}
+              onFollow={(hex) => set({ followFlightHex: hex })}
+            />
+          </div>
           <Row label="Status">
             <span className={cfg.followFlightHex ? "follow-setting-active" : "follow-setting-idle"}>
               {cfg.followFlightHex

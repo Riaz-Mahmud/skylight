@@ -30,6 +30,7 @@ export class Connection {
   private aircraftByHex = new Map<string, Aircraft>();
   private aircraftSeq = 0;
   private queuedPatch: Partial<Config> | null = null;
+  private pendingSnapshot = false;
   private queue: ClientMessage[] = [];
   private patchTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -73,7 +74,10 @@ export class Connection {
     };
     this.ws.onclose = () => {
       this.stopHeartbeat();
-      this.update({ connected: false, config: null });
+      // Keep the last-known config across reconnects so the display doesn't
+      // snap to DEFAULT_CONFIG defaults (e.g. radiusMiles:3) during a brief
+      // disconnection. Config is only cleared on explicit resetConfig().
+      this.update({ connected: false });
       this.scheduleReconnect();
     };
     this.ws.onerror = () => this.ws?.close();
@@ -103,10 +107,15 @@ export class Connection {
       case "aircraft":
         this.aircraftByHex = new Map(msg.aircraft.map((ac) => [ac.hex, ac]));
         this.aircraftSeq = msg.seq;
+        this.pendingSnapshot = false;
         this.update({ now: msg.now, aircraft: msg.aircraft });
         break;
       case "aircraftDelta":
+        if (this.pendingSnapshot) break; // wait for snapshot before applying deltas
         if (msg.seq !== this.aircraftSeq + 1) {
+          // Sequence gap — request a fresh snapshot but keep serving the stale
+          // map so the display doesn't flash blank while waiting.
+          this.pendingSnapshot = true;
           this.send({ type: "requestSnapshot" });
           break;
         }

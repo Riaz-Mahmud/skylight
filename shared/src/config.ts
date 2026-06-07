@@ -123,6 +123,18 @@ export interface Config {
   showDestArc: boolean;
   /** Add destination local time + distance-to-go to labels. */
   showRouteDetail: boolean;
+
+  // --- speed vectors ---
+  /** Draw a lookahead line from each glyph showing where it will be. */
+  showSpeedVectors: boolean;
+  /** How many minutes ahead the speed vector extends. */
+  speedVectorMinutes: number;
+
+  // --- alerts ---
+  /** Play an audio chime when an emergency squawk (7500/7600/7700) appears. */
+  alertSounds: boolean;
+  /** Flash a visual pulse on aircraft with military callsigns or type codes. */
+  alertInteresting: boolean;
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -144,7 +156,7 @@ export const DEFAULT_CONFIG: Config = {
   hideOnGround: true,
 
   interpolate: true,
-  maxExtrapolationSec: 10,
+  maxExtrapolationSec: 5,
   staleSec: 20,
   smoothing: 0.18,
   maxFps: 0,
@@ -170,7 +182,7 @@ export const DEFAULT_CONFIG: Config = {
   },
   glyphSizePx: 22,
   altitudeColor: true,
-  trailSeconds: 45,
+  trailSeconds: 30,
   brightness: 1,
 
   labelDensity: "all",
@@ -196,11 +208,17 @@ export const DEFAULT_CONFIG: Config = {
   showSun: true,
   showMoon: true,
   showSatellites: true,
-  starMagLimit: 2.6,
+  starMagLimit: 3.5,
   skyTimeOffsetMin: 0,
 
   showDestArc: true,
   showRouteDetail: true,
+
+  showSpeedVectors: false,
+  speedVectorMinutes: 2,
+
+  alertSounds: true,
+  alertInteresting: true,
 };
 
 /**
@@ -208,11 +226,17 @@ export const DEFAULT_CONFIG: Config = {
  * never drop nested keys (palette, showFields, fonts).
  */
 export function mergeConfig(base: Config, patch: Partial<Config>): Config {
-  return {
+  const merged = {
     ...base,
     ...patch,
     palette: { ...base.palette, ...(patch.palette ?? {}) },
     fonts: { ...base.fonts, ...(patch.fonts ?? {}) },
     showFields: { ...base.showFields, ...(patch.showFields ?? {}) },
   };
+  // hideOnlyAfterSec must be >= aircraftMemorySec; clamp silently so an
+  // out-of-range persisted value never causes aircraft to vanish immediately.
+  if (merged.hideOnlyAfterSec < merged.aircraftMemorySec) {
+    merged.hideOnlyAfterSec = merged.aircraftMemorySec;
+  }
+  return merged;
 }

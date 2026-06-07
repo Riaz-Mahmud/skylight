@@ -16,6 +16,8 @@ export interface SourceStatus {
   lastOk: number | null;
   /** Human-readable note (e.g. last error). */
   message?: string;
+  /** Server poll interval in ms — lets the renderer self-tune its render delay. */
+  pollMs?: number;
 }
 
 /** Server -> client. */

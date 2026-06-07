@@ -106,6 +106,17 @@ async function main(): Promise<void> {
     const config = store.patch({ centerLat, centerLon, radiusMiles });
     return res.json({ config, hasSavedConfig: store.hasSavedConfig() });
   });
+  app.get("/api/search", async (req, res) => {
+    const q = String(req.query.q ?? "").trim();
+    if (q.length < 2) return res.json({ aircraft: [] });
+    const aircraft = await poller.searchByCallsign(q);
+    // Seed follow position so the next poll centres on the result immediately.
+    const first = aircraft.find((ac) => ac.lat != null && ac.lon != null);
+    if (first?.lat != null && first.lon != null) {
+      poller.seedFollowPosition(first.lat, first.lon);
+    }
+    return res.json({ aircraft });
+  });
   app.get("/api/aircraft", (_req, res) => res.json(poller.getSnapshot()));
   app.get("/api/status", (_req, res) => res.json(poller.getStatus()));
   app.get("/api/stats", (_req, res) => res.json(stats.get()));
