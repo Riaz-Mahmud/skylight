@@ -185,15 +185,79 @@ function NearbyAircraftList({
   );
 }
 
+function TelemetryGraph({ history }: { history: { ts: number; alt: number; gs: number }[] }) {
+  if (history.length < 2) {
+    return (
+      <div className="telemetry-graph-empty" style={{ margin: "8px 0", height: "40px", fontSize: "10px", display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: "6px", color: "#6b7280" }}>
+        <span>Awaiting telemetry updates…</span>
+      </div>
+    );
+  }
+
+  const width = 270;
+  const height = 45;
+  const pad = 2;
+
+  const alts = history.map((p) => p.alt);
+  const speeds = history.map((p) => p.gs);
+  const maxAlt = Math.max(...alts, 1000);
+  const minAlt = Math.min(...alts, 0);
+  const maxSpeed = Math.max(...speeds, 100);
+  const minSpeed = Math.min(...speeds, 0);
+
+  const pointsAlt = history.map((p, idx) => {
+    const x = pad + (idx / (history.length - 1)) * (width - 2 * pad);
+    const y = height - pad - ((p.alt - minAlt) / Math.max(1, maxAlt - minAlt)) * (height - 2 * pad);
+    return { x, y };
+  });
+
+  const pointsSpeed = history.map((p, idx) => {
+    const x = pad + (idx / (history.length - 1)) * (width - 2 * pad);
+    const y = height - pad - ((p.gs - minSpeed) / Math.max(1, maxSpeed - minSpeed)) * (height - 2 * pad);
+    return { x, y };
+  });
+
+  const altPath = pointsAlt.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
+  const altAreaPath = `${altPath} L ${pointsAlt[pointsAlt.length - 1].x} ${height - pad} L ${pointsAlt[0].x} ${height - pad} Z`;
+  const speedPath = pointsSpeed.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
+
+  return (
+    <div className="telemetry-graph-wrapper" style={{ margin: "8px 0", background: "rgba(255, 255, 255, 0.02)", border: "1px solid rgba(255, 255, 255, 0.04)", borderRadius: "6px", padding: "6px", display: "flex", flexDirection: "column", alignItems: "center" }}>
+      <svg width={width} height={height} style={{ overflow: "visible" }}>
+        <defs>
+          <linearGradient id="altGradCtrl" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="rgba(155, 126, 207, 0.35)" />
+            <stop offset="100%" stopColor="rgba(155, 126, 207, 0)" />
+          </linearGradient>
+        </defs>
+        <line x1={pad} y1={height / 2} x2={width - pad} y2={height / 2} stroke="rgba(255, 255, 255, 0.05)" strokeWidth="1" />
+        <path d={altAreaPath} fill="url(#altGradCtrl)" />
+        <path d={altPath} fill="none" stroke="#9B7ECF" strokeWidth="1.5" />
+        <path d={speedPath} fill="none" stroke="#00FFFF" strokeWidth="1" strokeDasharray="1,1" />
+      </svg>
+      <div className="telemetry-legend" style={{ width: "100%", display: "flex", justifyContent: "space-between", marginTop: "4px", fontSize: "9px", fontWeight: "bold" }}>
+        <span className="legend-item" style={{ color: "#9B7ECF" }}>
+          ALT: {Math.round(alts[alts.length - 1]).toLocaleString()} ft
+        </span>
+        <span className="legend-item" style={{ color: "#00FFFF" }}>
+          SPD: {Math.round(speeds[speeds.length - 1])} kt
+        </span>
+      </div>
+    </div>
+  );
+}
+
 /** Full-screen flight detail popup. */
 function FlightDetailPopup({
   ac,
   cfg,
+  history,
   onClose,
   onToggleFollow,
 }: {
   ac: Aircraft;
   cfg: Config;
+  history: { ts: number; alt: number; gs: number }[];
   onClose: () => void;
   onToggleFollow: () => void;
 }) {
@@ -232,6 +296,7 @@ function FlightDetailPopup({
           <button className="popup-close" onClick={onClose}>✕</button>
         </div>
         <div className="popup-body">
+          <TelemetryGraph history={history} />
           {rows.map(([label, value]) => (
             <div key={label} className="popup-row">
               <span className="popup-label">{label}</span>
@@ -520,6 +585,7 @@ function LocationSection({
   );
 }
 
+
 // ─── main control component ───────────────────────────────────────────────────
 
 export function Control() {
@@ -527,6 +593,39 @@ export function Control() {
   const cfg = state.config;
 
   const [selectedAc, setSelectedAc] = useState<Aircraft | null>(null);
+
+
+  const telemetryHistory = useRef<Map<string, { ts: number; alt: number; gs: number }[]>>(new Map());
+
+  // Track telemetry history for aircraft
+  useEffect(() => {
+    const history = telemetryHistory.current;
+    const currentHexes = new Set(state.aircraft.map((ac) => ac.hex.toLowerCase()));
+
+    for (const hex of history.keys()) {
+      if (!currentHexes.has(hex)) history.delete(hex);
+    }
+
+    const now = Date.now();
+    for (const ac of state.aircraft) {
+      if (ac.lat == null || ac.lon == null) continue;
+      const hex = ac.hex.toLowerCase();
+      let list = history.get(hex);
+      if (!list) {
+        list = [];
+        history.set(hex, list);
+      }
+      const lastPoint = list[list.length - 1];
+      if (!lastPoint || now - lastPoint.ts >= 5000) {
+        list.push({
+          ts: now,
+          alt: ac.altBaro ?? 0,
+          gs: ac.gs ?? 0,
+        });
+        if (list.length > 60) list.shift();
+      }
+    }
+  }, [state.aircraft]);
 
   useEffect(() => {
     let active = true;
@@ -587,6 +686,7 @@ export function Control() {
         <FlightDetailPopup
           ac={activeAc!}
           cfg={cfg}
+          history={telemetryHistory.current.get(activeAc!.hex.toLowerCase()) ?? []}
           onClose={() => setSelectedAc(null)}
           onToggleFollow={() =>
             set({
@@ -669,6 +769,24 @@ export function Control() {
               Stop following and return home
             </button>
           )}
+        </Section>
+
+        <Section title="Watchlist">
+          <div style={{ padding: "4px" }}>
+            <input
+              className="location-input"
+              type="text"
+              placeholder="e.g. UAL1234, N12345, A380 (comma-separated)"
+              value={cfg.watchlist ?? ""}
+              onChange={(e) => set({ watchlist: e.target.value })}
+              autoComplete="off"
+              spellCheck={false}
+              style={{ width: "100%", boxSizing: "border-box" }}
+            />
+            <div style={{ fontSize: "10px", color: "#6b7280", marginTop: "6px", lineHeight: "1.4" }}>
+              Highlights callsigns/registrations with a cyan pulse and custom synth alert chime on the display when they pass overhead.
+            </div>
+          </div>
         </Section>
 
         <Section title="Location">
@@ -816,6 +934,12 @@ export function Control() {
           <Row label="Airport runways">
             <Toggle value={cfg.showAirport} onChange={(v) => set({ showAirport: v })} />
           </Row>
+          <Row label="Airspace sectors">
+            <Toggle value={cfg.showAirspace} onChange={(v) => set({ showAirspace: v })} />
+          </Row>
+          <Row label="Live weather radar">
+            <Toggle value={cfg.showWeather} onChange={(v) => set({ showWeather: v })} />
+          </Row>
           <Row label="Highlight emergency">
             <Toggle value={cfg.highlightEmergency} onChange={(v) => set({ highlightEmergency: v })} />
           </Row>
@@ -892,6 +1016,7 @@ export function Control() {
               onChange={(v) => set({ palette: { ...cfg.palette, text: v } })} />
           </div>
         </Section>
+
 
         <Section title="System">
           <button className="reset" onClick={() => location.assign("/setup")}>

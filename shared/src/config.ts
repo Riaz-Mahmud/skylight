@@ -105,6 +105,10 @@ export interface Config {
   highlightEmergency: boolean;
   /** Draw the airport (runways) at its true geographic position. */
   showAirport: boolean;
+  /** Draw live weather radar. */
+  showWeather: boolean;
+  /** Dynamically chosen airport geometry. Overrides bundled airports. */
+  customAirport?: any;
   /** Show the on-screen calibration HUD on the display. */
   showHud: boolean;
 
@@ -135,6 +139,11 @@ export interface Config {
   alertSounds: boolean;
   /** Flash a visual pulse on aircraft with military callsigns or type codes. */
   alertInteresting: boolean;
+  /** Comma-separated watchlist of registrations or callsigns, e.g. \"UAL1234, N12345\" */
+  watchlist: string;
+  /** Draw airspace sectors overlay */
+  showAirspace: boolean;
+
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -202,6 +211,8 @@ export const DEFAULT_CONFIG: Config = {
   compass: true,
   highlightEmergency: true,
   showAirport: true,
+  showWeather: false,
+  customAirport: null,
   showHud: false,
 
   showStars: true,
@@ -219,6 +230,8 @@ export const DEFAULT_CONFIG: Config = {
 
   alertSounds: true,
   alertInteresting: true,
+  watchlist: "",
+  showAirspace: true,
 };
 
 /**

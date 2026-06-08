@@ -10,7 +10,7 @@ import { STARS } from "./stars.js";
 const D2R = Math.PI / 180;
 const R2D = 180 / Math.PI;
 
-export type SkyKind = "sun" | "moon" | "star" | "satellite" | "iss";
+export type SkyKind = "sun" | "moon" | "star" | "satellite" | "iss" | "planet";
 
 export interface SkyBody {
   kind: SkyKind;
@@ -34,6 +34,7 @@ export interface Sky {
   moon?: SkyBody;
   stars: SkyBody[];
   sats: SkyBody[];
+  planets: SkyBody[];
 }
 
 export interface SkyOpts {
@@ -90,7 +91,7 @@ function getSatrec(tle: Tle): satellite.SatRec | null {
 
 export function computeSky(date: Date, latDeg: number, lonDeg: number, o: SkyOpts): Sky {
   const observer = new Astronomy.Observer(latDeg, lonDeg, 0);
-  const sky: Sky = { stars: [], sats: [] };
+  const sky: Sky = { stars: [], sats: [], planets: [] };
 
   if (o.sun) {
     const { az, alt } = bodyAltAz(Astronomy.Body.Sun, date, observer);
@@ -109,6 +110,26 @@ export function computeSky(date: Date, latDeg: number, lonDeg: number, o: SkyOpt
       const { az, alt } = starAltAz(s.ra, s.dec, lst, latDeg);
       if (alt < -2) continue; // below horizon
       sky.stars.push({ kind: "star", id: s.id, name: s.name, az, alt, mag: s.mag });
+    }
+
+    // Compute planetary positions
+    const planetBodies = [
+      { id: "venus", name: "Venus", body: Astronomy.Body.Venus },
+      { id: "jupiter", name: "Jupiter", body: Astronomy.Body.Jupiter },
+      { id: "mars", name: "Mars", body: Astronomy.Body.Mars },
+      { id: "saturn", name: "Saturn", body: Astronomy.Body.Saturn },
+    ];
+    for (const p of planetBodies) {
+      const { az, alt } = bodyAltAz(p.body, date, observer);
+      if (alt < -2) continue; // below horizon
+      let mag = 1.0;
+      try {
+        const illum = Astronomy.Illumination(p.body, date);
+        mag = illum.mag;
+      } catch {
+        // Fallback
+      }
+      sky.planets.push({ kind: "planet", id: p.id, name: p.name, az, alt, mag });
     }
   }
   if (o.satellites && o.tles.length) {

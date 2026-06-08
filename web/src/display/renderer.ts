@@ -28,6 +28,7 @@ import { classifyGlyph, drawAircraftGlyph, GLYPH_SCALE } from "./aircraftGlyph.j
 import { computeSky, type Sky, type Tle } from "./celestial.js";
 import { ASTERISMS } from "./stars.js";
 import { CITIES } from "./cities.js";
+import { WeatherRadar } from "./weather.js";
 
 /** How far in the past we render, ms. Starts at 1.15× the default poll cadence
  *  and is updated at runtime from the server's reported pollMs. */
@@ -111,7 +112,7 @@ interface Track {
   /** performance.now() when an alert pulse was triggered, undefined = none. */
   alertPulseAt?: number;
   /** Visual colour of the active alert pulse. */
-  alertPulseKind?: "emergency" | "interesting";
+  alertPulseKind?: "emergency" | "interesting" | "watchlist";
 }
 
 type ProjOpts = Parameters<typeof project>[1];
@@ -171,6 +172,8 @@ export interface AircraftHit {
 
 export class Renderer {
   private ctx: CanvasRenderingContext2D;
+  private issPulseAt?: number;
+  private weather = new WeatherRadar();
   private tracks = new Map<string, Track>();
   private raf = 0;
   private dpr = 1;
@@ -185,7 +188,7 @@ export class Renderer {
 
   // Sky layer state.
   private tles: Tle[] = [];
-  private sky: Sky = { stars: [], sats: [] };
+  private sky: Sky = { stars: [], sats: [], planets: [] };
   private skyComputedAt = 0;
   private skyOffsetUsed = NaN;
   private nearbyAirports: Airport[] = [];
@@ -299,8 +302,85 @@ export class Renderer {
     return best;
   }
 
+  hitTestAirport(clientX: number, clientY: number): Airport | null {
+    const rect = this.canvas.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+
+    const cfg = this.getConfig();
+    const pxPerM = pxPerMeter(this.w, this.h, cfg.radiusMiles);
+    const proj = {
+      rotationDeg: cfg.rotationDeg,
+      mirrorX: cfg.mirrorX,
+      mirrorY: cfg.mirrorY,
+      pxPerM,
+      screenW: this.w,
+      screenH: this.h,
+    };
+
+    let best: Airport | null = null;
+    let bestDistance = 25; // 25px click radius
+
+    for (const ap of this.nearbyAirports) {
+      let cx = 0;
+      let cy = 0;
+      let n = 0;
+      for (const r of ap.runways) {
+        const a = this.toScreen(r.le, cfg, proj);
+        const b = this.toScreen(r.he, cfg, proj);
+        cx += (a.x + b.x) / 2;
+        cy += (a.y + b.y) / 2;
+        n++;
+      }
+      if (n) {
+        cx /= n;
+        cy /= n;
+        const distance = Math.hypot(cx - x, cy - y);
+        if (distance < bestDistance) {
+          best = ap;
+          bestDistance = distance;
+        }
+      }
+    }
+    return best;
+  }
+
   getAircraftHit(hex: string): AircraftHit | null {
     return this.visibleHits.find((hit) => hit.aircraft.hex.toLowerCase() === hex.toLowerCase()) ?? null;
+  }
+
+  getAirportScreenPos(icao: string): { x: number; y: number } | null {
+    const ap = this.nearbyAirports.find(a => a.icao.toUpperCase() === icao.toUpperCase());
+    if (!ap) return null;
+    const cfg = this.getConfig();
+    const pxPerM = pxPerMeter(this.w, this.h, cfg.radiusMiles);
+    const proj = {
+      rotationDeg: cfg.rotationDeg,
+      mirrorX: cfg.mirrorX,
+      mirrorY: cfg.mirrorY,
+      pxPerM,
+      screenW: this.w,
+      screenH: this.h,
+    };
+    let cx = 0;
+    let cy = 0;
+    let n = 0;
+    for (const r of ap.runways) {
+      const a = this.toScreen(r.le, cfg, proj);
+      const b = this.toScreen(r.he, cfg, proj);
+      cx += (a.x + b.x) / 2;
+      cy += (a.y + b.y) / 2;
+      n++;
+    }
+    if (n) {
+      cx /= n;
+      cy /= n;
+    } else {
+      const pt = this.toScreen([ap.lat, ap.lon], cfg, proj);
+      cx = pt.x;
+      cy = pt.y;
+    }
+    return { x: cx, y: cy };
   }
 
   // ── Pan / explore mode ──────────────────────────────────────────────────────
@@ -484,6 +564,8 @@ export class Renderer {
     this.prevFrame = now;
     this.frameT = now / 1000;
 
+    this.weather.update(cfg);
+
     // Detect pan commits: when centerLat/Lon changes, flush all smoothed
     // renderedM values so trails and positions rebase to the new center cleanly.
     if (cfg.centerLat !== this.lastCenterLat || cfg.centerLon !== this.lastCenterLon) {
@@ -537,6 +619,8 @@ export class Renderer {
     if (followHex && cfg.showFollowContext) this.drawFollowContext(cfg, proj);
     this.drawOverlays(cfg, proj);
     if (cfg.showAirport) this.drawAirport(cfg, proj);
+    if (cfg.showAirspace) this.drawAirspace(cfg, proj);
+    this.weather.draw(ctx, cfg, proj, (m) => this.relativeToFollow(m));
     if (followHex && cfg.showFollowContext) this.drawFollowPlaceLabels(cfg, proj);
     if (this.panning || (this.panOffset.east !== 0 || this.panOffset.north !== 0)) {
       this.drawPanOverlay(cfg, proj);
@@ -622,13 +706,21 @@ export class Renderer {
       // ── Alert detection (fires once per hex per session) ──────────────────
       if (!this.alertedHexes.has(hex)) {
         const hasEmergency = !!tr.ac.squawk && EMERGENCY_SQUAWKS.has(tr.ac.squawk);
+        const isWatchlist = this.classifyWatchlist(tr.ac);
         const isInteresting = cfg.alertInteresting && this.classifyInteresting(tr.ac);
-        if (hasEmergency || isInteresting) {
+        if (hasEmergency || isWatchlist || isInteresting) {
           this.alertedHexes.add(hex);
           tr.alertPulseAt = now;
-          tr.alertPulseKind = hasEmergency ? "emergency" : "interesting";
-          if (cfg.alertSounds && hasEmergency) this.playAlertSound("emergency");
-          else if (cfg.alertSounds && isInteresting) this.playAlertSound("interesting");
+          if (hasEmergency) {
+            tr.alertPulseKind = "emergency";
+            if (cfg.alertSounds) this.playAlertSound("emergency");
+          } else if (isWatchlist) {
+            tr.alertPulseKind = "watchlist";
+            if (cfg.alertSounds) this.playAlertSound("watchlist");
+          } else {
+            tr.alertPulseKind = "interesting";
+            if (cfg.alertSounds) this.playAlertSound("interesting");
+          }
         }
       }
 
@@ -668,6 +760,13 @@ export class Renderer {
     this.drawLabels(cfg, byNear);
 
     if (cfg.theme === "focus" && byNear.length) this.drawDetailPanel(cfg, byNear[0]);
+
+    if (followed && followed.ac.origin && followed.ac.destination &&
+        followed.ac.originLat != null && followed.ac.originLon != null &&
+        followed.ac.destLat != null && followed.ac.destLon != null &&
+        followed.ac.lat != null && followed.ac.lon != null) {
+      this.drawFollowProgressBar(cfg, followed.ac);
+    }
 
     // Stale/estimated indicator (when showStaleIndicator is enabled).
     if (cfg.showStaleIndicator && cfg.aircraftMemorySec > 0) {
@@ -803,10 +902,12 @@ export class Renderer {
     // (with a generous 2× buffer so runways that extend to the edge still show).
     const followEast = Math.round(this.followOffset.east / 1000);
     const followNorth = Math.round(this.followOffset.north / 1000);
-    const airportKey = `${cfg.centerLat}:${cfg.centerLon}:${cfg.radiusMiles}:${followEast}:${followNorth}:${getAirportRevision()}`;
+    const customKey = cfg.customAirport ? cfg.customAirport.icao : "none";
+    const airportKey = `${cfg.centerLat}:${cfg.centerLon}:${cfg.radiusMiles}:${followEast}:${followNorth}:${getAirportRevision()}:${customKey}`;
     if (airportKey !== this.nearbyAirportsKey) {
       const cutoffMi = cfg.radiusMiles * 2;
-      this.nearbyAirports = AIRPORTS.filter((ap) => {
+      const allAirports = cfg.customAirport ? [...AIRPORTS.filter(a => a.icao !== cfg.customAirport?.icao), cfg.customAirport] : AIRPORTS;
+      this.nearbyAirports = allAirports.filter((ap) => {
         const m = this.relativeToFollow(llToMeters(ap.lat, ap.lon, cfg.centerLat, cfg.centerLon));
         return metersToMiles(rangeMeters(m)) <= cutoffMi;
       });
@@ -1117,7 +1218,7 @@ export class Renderer {
   private updateSky(cfg: Config, now: number): void {
     const want = cfg.showStars || cfg.showSun || cfg.showMoon || cfg.showSatellites;
     if (!want) {
-      this.sky = { stars: [], sats: [] };
+      this.sky = { stars: [], sats: [], planets: [] };
       return;
     }
     if (now - this.skyComputedAt < 300 && this.skyOffsetUsed === cfg.skyTimeOffsetMin) return;
@@ -1144,6 +1245,8 @@ export class Renderer {
     return project(this.relativeToFollow(m), proj);
   }
 
+  private issVisible = false;
+
   private drawSky(cfg: Config, proj: ProjOpts): void {
     const ctx = this.ctx;
     const b = cfg.brightness;
@@ -1169,6 +1272,45 @@ export class Renderer {
       }
       ctx.restore();
 
+      // Draw constellation names near their respective asterisms
+      const CONSTELLATIONS = [
+        { name: "ORION", stars: ["betelgeuse", "bellatrix", "alnitak", "alnilam", "mintaka", "saiph", "rigel"] },
+        { name: "BIG DIPPER", stars: ["dubhe", "merak", "phecda", "megrez", "alioth", "mizar", "alkaid"] },
+        { name: "CASSIOPEIA", stars: ["segin", "ruchbah", "navi", "schedar", "caph"] }
+      ];
+
+      for (const constel of CONSTELLATIONS) {
+        let sumX = 0;
+        let sumY = 0;
+        let count = 0;
+        for (const starId of constel.stars) {
+          const pt = pts.get(starId);
+          if (pt) {
+            sumX += pt.x;
+            sumY += pt.y;
+            count++;
+          }
+        }
+        if (count >= 3) {
+          const cx = sumX / count;
+          const cy = sumY / count;
+          this.withLabelRotation(cfg, cx, cy, () => {
+            ctx.save();
+            ctx.font = `italic 300 9px ${cfg.fonts.label}`;
+            ctx.fillStyle = `rgba(150, 170, 220, ${0.32 * b})`;
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            try {
+              ctx.letterSpacing = "2px";
+            } catch {
+              /* noop */
+            }
+            ctx.fillText(constel.name, cx, cy);
+            ctx.restore();
+          });
+        }
+      }
+
       // Stars themselves, sized + twinkling by magnitude.
       for (const s of this.sky.stars) {
         const p = pts.get(s.id!)!;
@@ -1189,6 +1331,24 @@ export class Renderer {
       }
     }
 
+    if (cfg.showStars && this.sky.planets && this.sky.planets.length) {
+      for (const p of this.sky.planets) {
+        const pt = this.projectSky(p.az, p.alt, cfg, proj);
+        const mag = p.mag ?? 1;
+        const size = Math.max(2.0, 3.5 - mag * 0.4);
+        const a = 0.95 * b;
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, size, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255, 253, 245, ${a})`;
+        ctx.shadowColor = `rgba(255, 240, 200, ${a * 0.8})`;
+        ctx.shadowBlur = size * 3.5;
+        ctx.fill();
+        ctx.restore();
+        if (p.name) this.skyLabel(pt, p.name, cfg, 0.65 * b);
+      }
+    }
+
     if (cfg.showMoon && this.sky.moon && this.sky.moon.alt > -2) {
       this.drawMoon(this.projectSky(this.sky.moon.az, this.sky.moon.alt, cfg, proj),
         this.sky.moon.illum ?? 1, this.sky.moon.waning ?? false, b);
@@ -1196,10 +1356,42 @@ export class Renderer {
     if (cfg.showSun && this.sky.sun && this.sky.sun.alt > -2) {
       this.drawSun(this.projectSky(this.sky.sun.az, this.sky.sun.alt, cfg, proj), b);
     }
+    
+    let issCurrentlyVisible = false;
     if (cfg.showSatellites && this.sky.sats.length) {
+      const now = performance.now();
       for (const sat of this.sky.sats) {
         const p = this.projectSky(sat.az, sat.alt, cfg, proj);
         const iss = sat.kind === "iss";
+        if (iss) {
+          issCurrentlyVisible = true;
+          if (!this.issVisible) {
+            this.issPulseAt = now;
+            if (cfg.alertSounds) this.playAlertSound("interesting");
+          }
+          
+          if (this.issPulseAt !== undefined) {
+            const age = (now - this.issPulseAt) / 1000;
+            const duration = 1.8;
+            if (age <= duration) {
+              const t = age / duration;
+              const pulseColor = hexToRgb("#8CFFD6");
+              for (const offset of [0, 0.35]) {
+                const phase = (t + offset) % 1;
+                const r = 10 * (1.8 + phase * 5);
+                const a = (1 - phase) * 0.7 * b;
+                if (a > 0.01) {
+                  ctx.beginPath();
+                  ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+                  ctx.strokeStyle = rgba(pulseColor, a);
+                  ctx.lineWidth = 1.5;
+                  ctx.stroke();
+                }
+              }
+            }
+          }
+        }
+        
         ctx.beginPath();
         ctx.arc(p.x, p.y, iss ? 3 : 1.6, 0, Math.PI * 2);
         if (iss) {
@@ -1214,6 +1406,7 @@ export class Renderer {
         if (iss) this.skyLabel({ x: p.x + 6, y: p.y - 6 }, "ISS", cfg, 0.9 * b, "#8CFFD6");
       }
     }
+    this.issVisible = issCurrentlyVisible;
   }
 
   private drawSun(p: Point, b: number): void {
@@ -1288,34 +1481,60 @@ export class Renderer {
     });
   }
 
-  // --- window to elsewhere: faint great-circle arc toward destination ---
+  // --- flight plan trajectory: full great-circle arc from origin to destination ---
   private drawDestArc(cfg: Config, proj: ProjOpts, v: Visible): void {
+    if (!v.followed) return;
     const ac = v.tr.ac;
     if (ac.lat == null || ac.lon == null || ac.destLat == null || ac.destLon == null) return;
     if (!routePlausible(ac, cfg)) return;
-    const brg = bearing(ac.lat, ac.lon, ac.destLat, ac.destLon) * (Math.PI / 180);
-    const stepM = cfg.radiusMiles * 1609.34 * 0.5;
-    const ahead = project(
-      { east: v.m.east + Math.sin(brg) * stepM, north: v.m.north + Math.cos(brg) * stepM },
-      proj,
-    );
-    const dx = ahead.x - v.p.x;
-    const dy = ahead.y - v.p.y;
-    const len = Math.hypot(dx, dy) || 1;
-    const L = Math.min(this.w, this.h) * 0.24;
-    const ex = v.p.x + (dx / len) * L;
-    const ey = v.p.y + (dy / len) * L;
+
+    const lat1 = ac.lat;
+    const lon1 = ac.lon;
+    const lat2 = ac.destLat;
+    const lon2 = ac.destLon;
+
+    const φ1 = lat1 * DEG, λ1 = lon1 * DEG;
+    const φ2 = lat2 * DEG, λ2 = lon2 * DEG;
+    const dφ = φ2 - φ1;
+    const dλ = λ2 - λ1;
+    const a = Math.sin(dφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(dλ / 2) ** 2;
+    const δ = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+    if (δ < 1e-6) return;
+
+    const steps = 60;
+    const pts: Point[] = [];
+    for (let i = 0; i <= steps; i++) {
+      const f = i / steps;
+      const A = Math.sin((1 - f) * δ) / Math.sin(δ);
+      const B = Math.sin(f * δ) / Math.sin(δ);
+      const x = A * Math.cos(φ1) * Math.cos(λ1) + B * Math.cos(φ2) * Math.cos(λ2);
+      const y = A * Math.cos(φ1) * Math.sin(λ1) + B * Math.cos(φ2) * Math.sin(λ2);
+      const z = A * Math.sin(φ1) + B * Math.sin(φ2);
+      const latI = Math.atan2(z, Math.sqrt(x * x + y * y)) / DEG;
+      const lonI = Math.atan2(y, x) / DEG;
+
+      const m = llToMeters(latI, lonI, cfg.centerLat, cfg.centerLon);
+      pts.push(project(this.relativeToFollow(m), proj));
+    }
+
     const ctx = this.ctx;
     ctx.save();
-    const grad = ctx.createLinearGradient(v.p.x, v.p.y, ex, ey);
-    grad.addColorStop(0, rgba(v.color, 0.32 * v.alpha));
-    grad.addColorStop(1, rgba(v.color, 0));
-    ctx.strokeStyle = grad;
-    ctx.lineWidth = 1.3;
-    ctx.setLineDash([2, 5]);
+    ctx.strokeStyle = rgba(v.color, 0.18 * v.alpha);
+    ctx.lineWidth = 1.4;
+    ctx.setLineDash([3, 8]);
     ctx.beginPath();
-    ctx.moveTo(v.p.x, v.p.y);
-    ctx.lineTo(ex, ey);
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i <= steps; i++) {
+      // Prevent drawing horizontal lines across the entire screen if it wraps the antimeridian
+      if (Math.abs(pts[i].x - pts[i-1].x) > this.w / 2) {
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(pts[i].x, pts[i].y);
+      } else {
+        ctx.lineTo(pts[i].x, pts[i].y);
+      }
+    }
     ctx.stroke();
     ctx.restore();
   }
@@ -1425,7 +1644,9 @@ export class Renderer {
     if (age > duration) { tr.alertPulseAt = undefined; return; }
     const pulseColor = tr.alertPulseKind === "emergency"
       ? hexToRgb("#FF5A47")
-      : hexToRgb("#9B7ECF");
+      : tr.alertPulseKind === "watchlist"
+        ? hexToRgb("#00FFFF")
+        : hexToRgb("#9B7ECF");
     const s = (this.getConfig().glyphSizePx) * GLYPH_SCALE[classifyGlyph(tr.ac)];
     const t = age / duration;
     // Two rings at different phases for a ripple effect.
@@ -1447,28 +1668,41 @@ export class Renderer {
     "RCH", "RRR", "SAM", "REACH", "GHOST", "SPAR", "DUKE", "JAKE", "STEEL",
     "VENUS", "ARISE", "KNIFE", "HOMER", "ROCKY", "TROLL",
   ];
-  private readonly MILITARY_TYPES = new Set([
+  private readonly INTERESTING_TYPES = new Set([
     "F16", "F15", "F18", "F22", "F35", "B52", "B1", "B2",
     "C130", "C17", "C5", "E3TF", "E8", "KC135", "KC10", "P8",
     "U2", "A10", "V22", "MQ9", "RQ4", "RC135", "EC130",
+    "A388", "A124", "A225", "B748" // giants
   ]);
 
   private classifyInteresting(ac: Aircraft): boolean {
     const flight = (ac.flight ?? "").toUpperCase().replace(/\s/g, "");
     if (this.MILITARY_PREFIXES.some((p) => flight.startsWith(p))) return true;
     const type = (ac.typeCode ?? "").toUpperCase();
-    if (type && this.MILITARY_TYPES.has(type)) return true;
+    if (type && this.INTERESTING_TYPES.has(type)) return true;
     return false;
   }
 
-  private playAlertSound(kind: "emergency" | "interesting"): void {
+  private classifyWatchlist(ac: Aircraft): boolean {
+    const watchlistStr = this.getConfig().watchlist ?? "";
+    if (!watchlistStr) return false;
+    const items = watchlistStr.toUpperCase().split(",").map(i => i.trim()).filter(Boolean);
+    if (items.length === 0) return false;
+    const reg = (ac.registration ?? "").toUpperCase().trim();
+    const call = (ac.flight ?? "").toUpperCase().trim();
+    return items.some(item => reg === item || call === item || reg.startsWith(item) || call.startsWith(item));
+  }
+
+  private playAlertSound(kind: "emergency" | "interesting" | "watchlist"): void {
     const ctx = this.audioCtx;
     if (!ctx) return;
-    // Emergency: three descending tones. Interesting: two softer ascending tones.
+    // Emergency: three descending tones. Watchlist: two ascending tones. Interesting: two softer ascending tones.
     const tones = kind === "emergency"
       ? [{ f: 1100, t: 0 }, { f: 880, t: 0.18 }, { f: 660, t: 0.36 }]
-      : [{ f: 660, t: 0 }, { f: 880, t: 0.20 }];
-    const gain = kind === "emergency" ? 0.14 : 0.09;
+      : kind === "watchlist"
+        ? [{ f: 523.25, t: 0 }, { f: 659.25, t: 0.12 }]
+        : [{ f: 660, t: 0 }, { f: 880, t: 0.20 }];
+    const gain = kind === "emergency" ? 0.14 : kind === "watchlist" ? 0.12 : 0.09;
     for (const { f, t } of tones) {
       const osc = ctx.createOscillator();
       const env = ctx.createGain();
@@ -1852,6 +2086,221 @@ export class Renderer {
     }
     ctx.restore();
   }
+
+  private drawFollowProgressBar(cfg: Config, ac: Aircraft): void {
+    const ctx = this.ctx;
+    const lat = ac.lat!;
+    const lon = ac.lon!;
+    const oLat = ac.originLat!;
+    const oLon = ac.originLon!;
+    const dLat = ac.destLat!;
+    const dLon = ac.destLon!;
+
+    const totalDist = greatCircleMiles(oLat, oLon, dLat, dLon);
+    if (totalDist < 1) return;
+    const remainingDist = greatCircleMiles(lat, lon, dLat, dLon);
+    const elapsedDist = Math.max(0, totalDist - remainingDist);
+    const progress = clamp01(elapsedDist / totalDist);
+
+    const speedKt = ac.gs ?? 0;
+    const speedMph = speedKt * 1.15078;
+    const hoursRemaining = speedMph > 50 ? remainingDist / speedMph : null;
+
+    let timeText = "";
+    if (hoursRemaining !== null) {
+      const h = Math.floor(hoursRemaining);
+      const m = Math.floor((hoursRemaining - h) * 60);
+      const etaStr = localTimeAt(dLon, hoursRemaining);
+      timeText = ` · ${h}h ${m}m left (ETA: ${etaStr})`;
+    } else {
+      const etaStr = localTimeAt(dLon, 0);
+      timeText = ` · Local: ${etaStr}`;
+    }
+
+    const panelX = this.w / 2;
+    const panelY = this.h - 55;
+
+    this.withLabelRotation(cfg, panelX, panelY, () => {
+      ctx.save();
+      ctx.shadowColor = "rgba(0,0,0,0.9)";
+      ctx.shadowBlur = 8;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+
+      const barWidth = 260;
+      const xStart = panelX - barWidth / 2;
+      const xEnd = panelX + barWidth / 2;
+
+      // Draw progress bar background line
+      ctx.strokeStyle = rgba(hexToRgb(cfg.palette.grid), 0.4 * cfg.brightness);
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(xStart, panelY);
+      ctx.lineTo(xEnd, panelY);
+      ctx.stroke();
+
+      // Draw progress line
+      ctx.strokeStyle = rgba(hexToRgb(cfg.palette.accent), 0.8 * cfg.brightness);
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(xStart, panelY);
+      ctx.lineTo(xStart + progress * barWidth, panelY);
+      ctx.stroke();
+
+      // Draw Origin code
+      ctx.font = `500 11px ${cfg.fonts.mono}`;
+      ctx.fillStyle = rgba(hexToRgb(cfg.palette.text), 0.7 * cfg.brightness);
+      ctx.textAlign = "right";
+      ctx.fillText(ac.origin!, xStart - 10, panelY);
+
+      // Draw Destination code
+      ctx.textAlign = "left";
+      ctx.fillText(ac.destination!, xEnd + 10, panelY);
+
+      // Draw Airplane icon
+      ctx.font = `14px sans-serif`;
+      ctx.fillStyle = rgba(hexToRgb(cfg.palette.accent), 0.95 * cfg.brightness);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("✈", xStart + progress * barWidth, panelY - 0.5);
+
+      // Draw details text below
+      ctx.font = `300 10px ${cfg.fonts.label}`;
+      ctx.fillStyle = rgba(hexToRgb(cfg.palette.text), 0.55 * cfg.brightness);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      const detailStr = `${Math.round(elapsedDist).toLocaleString()} mi flown · ${Math.round(remainingDist).toLocaleString()} mi to go${timeText}`;
+      ctx.fillText(detailStr, panelX, panelY + 10);
+
+      ctx.restore();
+    });
+  }
+
+  private drawAirspace(cfg: Config, proj: ProjOpts): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.strokeStyle = rgba(hexToRgb(cfg.palette.grid), 0.22 * cfg.brightness);
+    ctx.fillStyle = rgba(hexToRgb(cfg.palette.grid), 0.35 * cfg.brightness);
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+
+    const centerScreenX = this.w / 2;
+    const centerScreenY = this.h / 2;
+
+    // 1. Draw Sector boundaries centered on screen
+    const rad1 = 15 * 1609.34 * proj.pxPerM;
+    const rad2 = 30 * 1609.34 * proj.pxPerM;
+    
+    if (rad1 > 50 && rad1 < this.w * 2) {
+      ctx.beginPath();
+      ctx.arc(centerScreenX, centerScreenY, rad1, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    if (rad2 > 50 && rad2 < this.w * 2) {
+      ctx.beginPath();
+      ctx.arc(centerScreenX, centerScreenY, rad2, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    const angles = [60, 150, 240, 330];
+    for (const angle of angles) {
+      const radAngle = (angle + proj.rotationDeg) * Math.PI / 180;
+      const x1 = centerScreenX + Math.cos(radAngle) * 20;
+      const y1 = centerScreenY + Math.sin(radAngle) * 20;
+      const x2 = centerScreenX + Math.cos(radAngle) * Math.max(this.w, this.h);
+      const y2 = centerScreenY + Math.sin(radAngle) * Math.max(this.w, this.h);
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+    }
+
+    ctx.setLineDash([]);
+    ctx.font = `8px ${cfg.fonts.mono}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    const labelOffset = 22 * 1609.34 * proj.pxPerM;
+    const labelAngles = [15, 105, 195, 285];
+    const sectorLabels = [
+      "TMA SECTOR NORTH\nSFC - FL195",
+      "TMA SECTOR EAST\nSFC - FL195",
+      "TMA SECTOR SOUTH\nSFC - FL195",
+      "TMA SECTOR WEST\nSFC - FL195"
+    ];
+
+    for (let i = 0; i < labelAngles.length; i++) {
+      const angle = labelAngles[i];
+      const radAngle = (angle + proj.rotationDeg) * Math.PI / 180;
+      const lx = centerScreenX + Math.cos(radAngle) * labelOffset;
+      const ly = centerScreenY + Math.sin(radAngle) * labelOffset;
+
+      if (lx > 0 && lx < this.w && ly > 0 && ly < this.h) {
+        ctx.fillStyle = rgba(hexToRgb(cfg.palette.grid), 0.28 * cfg.brightness);
+        const lines = sectorLabels[i].split("\n");
+        ctx.fillText(lines[0], lx, ly - 5);
+        ctx.fillText(lines[1], lx, ly + 5);
+      }
+    }
+
+    // 2. Draw CTRs and Airways for nearby airports
+    ctx.setLineDash([2, 5]);
+    const ctrRad = 5 * 1609.34 * proj.pxPerM;
+
+    const screenAirports: { ap: Airport; x: number; y: number }[] = [];
+    for (const ap of this.nearbyAirports.slice(0, 5)) {
+      const pos = this.getAirportScreenPos(ap.icao);
+      if (pos) {
+        screenAirports.push({ ap, x: pos.x, y: pos.y });
+      }
+    }
+
+    for (const sa of screenAirports) {
+      if (sa.x > -100 && sa.x < this.w + 100 && sa.y > -100 && sa.y < this.h + 100) {
+        ctx.strokeStyle = rgba(hexToRgb(cfg.palette.grid), 0.25 * cfg.brightness);
+        ctx.beginPath();
+        ctx.arc(sa.x, sa.y, ctrRad, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.fillStyle = rgba(hexToRgb(cfg.palette.grid), 0.35 * cfg.brightness);
+        ctx.fillText(`${sa.ap.name} CTR`, sa.x, sa.y - ctrRad - 6);
+      }
+    }
+
+    ctx.strokeStyle = rgba(hexToRgb(cfg.palette.grid), 0.15 * cfg.brightness);
+    ctx.setLineDash([3, 10]);
+    for (let i = 0; i < screenAirports.length; i++) {
+      for (let j = i + 1; j < screenAirports.length; j++) {
+        const a = screenAirports[i];
+        const b = screenAirports[j];
+        
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+
+        const mx = (a.x + b.x) / 2;
+        const my = (a.y + b.y) / 2;
+
+        if (mx > 10 && mx < this.w - 10 && my > 10 && my < this.h - 10) {
+          ctx.save();
+          ctx.fillStyle = rgba(hexToRgb(cfg.palette.grid), 0.25 * cfg.brightness);
+          ctx.beginPath();
+          ctx.moveTo(mx, my - 4);
+          ctx.lineTo(mx + 4, my + 3);
+          ctx.lineTo(mx - 4, my + 3);
+          ctx.closePath();
+          ctx.fill();
+
+          ctx.font = `6px ${cfg.fonts.mono}`;
+          ctx.fillText(`AIRWAY T${100 + i + j}`, mx, my + 10);
+          ctx.restore();
+        }
+      }
+    }
+
+    ctx.restore();
+  }
 }
 
 function clamp01(x: number): number {
@@ -1888,9 +2337,9 @@ function greatCircleMiles(lat1: number, lon1: number, lat2: number, lon2: number
 }
 
 /** Longitude-based mean solar time at a place (no DST/tz db) as HH:MM. */
-function localTimeAt(lon: number): string {
+function localTimeAt(lon: number, addHours = 0): string {
   const now = new Date();
-  const utcMin = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const utcMin = now.getUTCHours() * 60 + now.getUTCMinutes() + addHours * 60;
   let m = (utcMin + (lon / 15) * 60) % 1440;
   if (m < 0) m += 1440;
   const hh = Math.floor(m / 60);

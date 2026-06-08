@@ -92,6 +92,7 @@ async function main(): Promise<void> {
     const centerLat = Number(req.body?.centerLat);
     const centerLon = Number(req.body?.centerLon);
     const radiusMiles = Number(req.body?.radiusMiles);
+    const customAirport = req.body?.customAirport;
 
     if (!Number.isFinite(centerLat) || centerLat < -90 || centerLat > 90) {
       return res.status(400).json({ error: "centerLat must be in range [-90, 90]" });
@@ -103,7 +104,9 @@ async function main(): Promise<void> {
       return res.status(400).json({ error: "radiusMiles must be in range (0, 200]" });
     }
 
-    const config = store.patch({ centerLat, centerLon, radiusMiles });
+    const patch: any = { centerLat, centerLon, radiusMiles };
+    if (customAirport) patch.customAirport = customAirport;
+    const config = store.patch(patch);
     return res.json({ config, hasSavedConfig: store.hasSavedConfig() });
   });
   app.get("/api/search", async (req, res) => {

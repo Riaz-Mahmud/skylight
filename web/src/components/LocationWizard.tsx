@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import type { LeafletMouseEvent } from "leaflet";
 import { CircleMarker, MapContainer, TileLayer, useMap, useMapEvents } from "react-leaflet";
+import { fetchClosestAirport } from "./ourairports.js";
 
 interface GeocodeResult {
   display_name: string;
@@ -44,6 +45,7 @@ export function LocationWizard() {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState("");
 
   useEffect(() => {
     let live = true;
@@ -104,10 +106,14 @@ export function LocationWizard() {
     setSaving(true);
     setError(null);
     try {
+      setSaveStatus("Fetching nearest airport geometry...");
+      const customAirport = await fetchClosestAirport(lat, lon);
+      
+      setSaveStatus("Saving config...");
       const res = await fetch("/api/setup/location", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ centerLat: lat, centerLon: lon, radiusMiles }),
+        body: JSON.stringify({ centerLat: lat, centerLon: lon, radiusMiles, customAirport }),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -117,6 +123,7 @@ export function LocationWizard() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed");
       setSaving(false);
+      setSaveStatus("");
     }
   };
 
@@ -214,6 +221,7 @@ export function LocationWizard() {
         </div>
 
         {error && <p className="setup-error">{error}</p>}
+        {saveStatus && !error && <p className="setup-status">{saveStatus}</p>}
 
         <div className="setup-actions">
           <button type="button" className="primary" disabled={saving} onClick={save}>
