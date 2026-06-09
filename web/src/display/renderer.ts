@@ -113,6 +113,10 @@ interface Track {
   alertPulseAt?: number;
   /** Visual colour of the active alert pulse. */
   alertPulseKind?: "emergency" | "interesting" | "watchlist";
+  /** Set once we're confident the aircraft has landed (soft-landing hysteresis).
+   *  Prevents the flicker caused by a taxiing plane oscillating around the
+   *  speed threshold — once committed, the track is suppressed for good. */
+  landingCommitted?: boolean;
 }
 
 type ProjOpts = Parameters<typeof project>[1];
@@ -453,10 +457,18 @@ export class Renderer {
     const cfg = this.getConfig();
     const now = performance.now();
     const seenHexes = new Set<string>();
+    /** Hexes that are still in the live feed but now fail the filter (e.g. just
+     *  landed). We remove them immediately instead of leaving them as estimated
+     *  ghosts on the runway while the next arrival is on final approach. */
+    const failedFilterHexes = new Set<string>();
 
     for (const ac of aircraft) {
-      if (!this.passesFilter(ac, cfg)) continue;
       const hex = ac.hex.toLowerCase();
+      if (!this.passesFilter(ac, cfg)) {
+        // If we were already tracking this aircraft, mark it for immediate removal.
+        if (this.tracks.has(hex)) failedFilterHexes.add(hex);
+        continue;
+      }
       seenHexes.add(hex);
       const hasPos = ac.lat != null && ac.lon != null;
       let tr = this.tracks.get(hex);
@@ -501,6 +513,15 @@ export class Renderer {
       }
     }
 
+    // Remove tracks that are still present in the live feed but now fail the
+    // filter (e.g. the aircraft just landed and crossed the near-ground threshold).
+    // Doing this here — before the estimated-memory block — ensures they vanish
+    // immediately rather than lingering as dimmed ghosts on the runway.
+    for (const hex of failedFilterHexes) {
+      this.tracks.delete(hex);
+      this.alertedHexes.delete(hex);
+    }
+
     // Mark aircraft absent from this snapshot as estimated (if memory is enabled).
     if (cfg.aircraftMemorySec > 0) {
       for (const [, tr] of this.tracks) {
@@ -519,6 +540,12 @@ export class Renderer {
       if (alt < cfg.minAltitudeFt) return false;
       if (alt > cfg.maxAltitudeFt) return false;
     }
+    // Catch "soft landings": aircraft where the data source hasn't yet flipped
+    // onGround=true but the plane is clearly rolling out or taxiing — very low
+    // altitude AND very low ground speed. Without this, a freshly-landed flight
+    // keeps updating lastSeen and stays rendered on the runway while the next
+    // arrival is on short final, creating a phantom collision.
+    if (cfg.hideOnGround && alt != null && alt < 400 && (ac.gs ?? 999) < 50) return false;
     return true;
   }
 
