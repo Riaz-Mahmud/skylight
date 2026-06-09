@@ -26,7 +26,7 @@ const RADIO_URL =
   process.env.AIRCRAFT_JSON_URL ?? "http://localhost:8080/data/aircraft.json";
 const API_URL =
   process.env.API_URL ?? "https://api.airplanes.live/v2/point/{lat}/{lon}/{r}";
-const POLL_MS = Number(process.env.POLL_MS ?? 1000);
+const POLL_MS = Number(process.env.POLL_MS ?? (SOURCE === "api" ? 2000 : 1000));
 const ROUTE_CACHE_HOURS = Number(process.env.ROUTE_CACHE_HOURS ?? 12);
 // When on radio, also poll the API and merge (keeps landing aircraft alive).
 const SUPPLEMENT_API = (process.env.SUPPLEMENT_API ?? "1") !== "0";

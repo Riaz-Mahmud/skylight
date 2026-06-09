@@ -117,6 +117,10 @@ interface Track {
    *  Prevents the flicker caused by a taxiing plane oscillating around the
    *  speed threshold — once committed, the track is suppressed for good. */
   landingCommitted?: boolean;
+  /** performance.now() of the most recent history entry we've seen, used to
+   *  detect data gaps and dead-reckon renderedM through them so we never get
+   *  a large snap when positions resume after a pause. */
+  lastFixT?: number;
 }
 
 type ProjOpts = Parameters<typeof project>[1];
@@ -496,6 +500,7 @@ export class Renderer {
         // Dedup identical fixes (source sometimes repeats a position).
         if (!last || last.lat !== ac.lat || last.lon !== ac.lon) {
           tr.history.push({ t: now, lat: ac.lat!, lon: ac.lon!, track: ac.track, gs: ac.gs });
+          tr.lastFixT = now;
           // Keep the full flight path for the followed aircraft (up to buffer
           // capacity); everyone else is trimmed to the trail window.
           const isFollowed = hex === cfg.followFlightHex.toLowerCase();
@@ -634,6 +639,19 @@ export class Renderer {
     const followedPosition = followed ? this.sampleAt(followed, tt, cfg) : null;
     if (followed && followedPosition) {
       followed.renderedM ??= followedPosition;
+      // Dead-reckon through gaps for the followed aircraft too.
+      const newestFixT = followed.history.last()?.t;
+      if (
+        newestFixT !== undefined &&
+        followed.lastFixT !== undefined &&
+        newestFixT > followed.lastFixT + 1500 &&
+        followed.ac.gs != null && followed.ac.gs > 30 &&
+        followed.ac.track != null
+      ) {
+        const gapSec = Math.min((newestFixT - followed.lastFixT) / 1000, cfg.maxExtrapolationSec);
+        followed.renderedM = deadReckon(followed.renderedM, followed.ac.track, followed.ac.gs, gapSec);
+        followed.lastFixT = newestFixT; // consumed
+      }
       followed.renderedM = {
         east: followed.renderedM.east + (followedPosition.east - followed.renderedM.east) * motionFactor,
         north: followed.renderedM.north + (followedPosition.north - followed.renderedM.north) * motionFactor,
@@ -710,6 +728,22 @@ export class Renderer {
       // If somehow still undefined (e.g. center changed), seed it now.
       if (!tr.renderedM) tr.renderedM = sampled;
       if (tr !== followed) {
+        // Gap detection: if the newest history fix is significantly newer than
+        // the last one we saw, the source was paused (e.g. rate-limited).
+        // Dead-reckon renderedM forward through the gap so the lerp only has a
+        // tiny residual to close instead of the full multi-second displacement.
+        const newestFixT = tr.history.last()?.t;
+        if (
+          newestFixT !== undefined &&
+          tr.lastFixT !== undefined &&
+          newestFixT > tr.lastFixT + 1500 &&
+          tr.ac.gs != null && tr.ac.gs > 30 &&
+          tr.ac.track != null
+        ) {
+          const gapSec = Math.min((newestFixT - tr.lastFixT) / 1000, cfg.maxExtrapolationSec);
+          tr.renderedM = deadReckon(tr.renderedM, tr.ac.track, tr.ac.gs, gapSec);
+          tr.lastFixT = newestFixT; // consumed — don't apply again next frame
+        }
         tr.renderedM = {
           east:  tr.renderedM.east  + (sampled.east  - tr.renderedM.east)  * motionFactor,
           north: tr.renderedM.north + (sampled.north - tr.renderedM.north) * motionFactor,
@@ -1430,7 +1464,17 @@ export class Renderer {
         }
         ctx.fill();
         ctx.shadowBlur = 0;
-        if (iss) this.skyLabel({ x: p.x + 6, y: p.y - 6 }, "ISS", cfg, 0.9 * b, "#8CFFD6");
+        if (iss) {
+          this.skyLabel({ x: p.x + 6, y: p.y - 6 }, "ISS", cfg, 0.9 * b, "#8CFFD6");
+        } else if (sat.name) {
+          // Title-case the TLE name (e.g. "STARLINK-1234" → "Starlink-1234")
+          // so it reads quietly alongside the aircraft labels.
+          const label = sat.name
+            .split(/\s+/)
+            .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+            .join(" ");
+          this.skyLabel({ x: p.x + 4, y: p.y - 4 }, label, cfg, 0.45 * b, "#AAC8FF");
+        }
       }
     }
     this.issVisible = issCurrentlyVisible;

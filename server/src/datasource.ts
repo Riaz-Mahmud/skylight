@@ -53,9 +53,29 @@ function normalize(raw: RawAircraft, ts: number): Aircraft | null {
 /** Airplanes.live radius is nautical miles; SkyLight config uses statute miles. */
 const NM_PER_MILE = 0.868976;
 
+class HttpError extends Error {
+  constructor(
+    public readonly status: number,
+    /** Seconds to wait before retrying, from Retry-After header (if present). */
+    public readonly retryAfterSec?: number,
+  ) {
+    super(`HTTP ${status}`);
+  }
+}
+
 async function fetchJson(url: string, timeoutMs: number): Promise<any> {
   const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    let retryAfterSec: number | undefined;
+    if (res.status === 429) {
+      const h = res.headers.get("Retry-After");
+      if (h) {
+        const n = Number(h);
+        retryAfterSec = Number.isFinite(n) && n > 0 ? n : undefined;
+      }
+    }
+    throw new HttpError(res.status, retryAfterSec);
+  }
   return res.json();
 }
 
@@ -127,6 +147,10 @@ export class Poller {
   private apiRunning = false;
   private apiFailures = 0;
   private nextApiAttempt = 0;
+  /** Consecutive primary-source failures (used for backoff when rate-limited). */
+  private primaryFailures = 0;
+  /** Earliest time (Date.now()) we're allowed to retry the primary source. */
+  private nextPrimaryAttempt = 0;
   private lastStickyPrune = 0;
   private followTargetHex = "";
   private followTargetPosition: { lat: number; lon: number } | null = null;
@@ -168,7 +192,7 @@ export class Poller {
     this.apiTimer = null;
   }
 
-  private async fetchList(source: DataSource, now: number): Promise<Aircraft[] | null> {
+  private async fetchList(source: DataSource, now: number): Promise<{ list: Aircraft[]; rateLimited: boolean; retryAfterSec?: number } | null> {
     // Timeout = 80% of poll interval, capped at 4 s. Prevents fetch pile-up
     // when the source is slow (e.g. Pi SDR under load).
     const timeoutMs = Math.min(4000, this.o.pollMs * 0.8);
@@ -183,13 +207,15 @@ export class Poller {
         const ac = normalize(raw, now);
         if (ac) list.push(ac);
       }
-      return list;
+      return { list, rateLimited: false };
     } catch (error) {
+      const rateLimited = error instanceof HttpError && error.status === 429;
+      const retryAfterSec = error instanceof HttpError ? error.retryAfterSec : undefined;
       const message = error instanceof Error ? error.message : "unknown fetch error";
       if (source === this.o.source) {
         this.status = { ...this.status, ok: false, message };
       }
-      return null;
+      return rateLimited ? { list: [], rateLimited: true, retryAfterSec } : null;
     }
   }
 
@@ -199,9 +225,9 @@ export class Poller {
     if (this.apiRunning || now < this.nextApiAttempt) return;
     this.apiRunning = true;
     try {
-      const list = await this.fetchList("api", now);
-      if (list) {
-        this.lastApi = list;
+      const result = await this.fetchList("api", now);
+      if (result) {
+        this.lastApi = result.list;
         this.apiFailures = 0;
         this.nextApiAttempt = 0;
       } else {
@@ -241,11 +267,43 @@ export class Poller {
     this.tickRunning = true;
     const now = Date.now();
     try {
-      const primary = await this.fetchList(this.o.source, now);
-      if (primary === null) {
+      // If we're in a rate-limit backoff window, skip the fetch but still
+      // re-broadcast the last known snapshot so the renderer's lastSeen
+      // timestamps stay fresh — preventing the freeze-then-jump artifact.
+      if (now < this.nextPrimaryAttempt) {
+        this.status = { ...this.status, retryAfterMs: this.nextPrimaryAttempt };
+        this.o.onSnapshot(now, this.last);
         this.o.onStatus(this.status);
         return;
       }
+
+      const result = await this.fetchList(this.o.source, now);
+
+      if (result === null) {
+        // Hard error (network failure, malformed response, etc.) — don't re-broadcast.
+        this.primaryFailures++;
+        this.o.onStatus(this.status);
+        return;
+      }
+
+      if (result.rateLimited) {
+        // 429: honour Retry-After if the server sent one; otherwise back off
+        // exponentially (pollMs × 2^failures, capped at 60s).
+        this.primaryFailures++;
+        const serverWaitMs = result.retryAfterSec != null ? result.retryAfterSec * 1000 : 0;
+        const backoffMs = Math.min(60_000, this.o.pollMs * 2 ** this.primaryFailures);
+        this.nextPrimaryAttempt = now + Math.max(serverWaitMs, backoffMs);
+        this.status = { ...this.status, retryAfterMs: this.nextPrimaryAttempt };
+        this.o.onSnapshot(now, this.last);
+        this.o.onStatus(this.status);
+        return;
+      }
+
+      // Clean success — reset backoff.
+      this.primaryFailures = 0;
+      this.nextPrimaryAttempt = 0;
+
+      const primary = result.list;
       const supplement = this.o.source === "radio" && this.o.supplementApi;
       const merged = supplement ? mergeSources(primary, this.lastApi) : primary;
       this.retainFollowedAircraft(merged, now);
@@ -262,6 +320,7 @@ export class Poller {
         lastOk: now,
         pollMs: this.o.pollMs,
         message: supplement ? `radio + ${this.lastApi.length} via API` : undefined,
+        retryAfterMs: undefined,
       };
       this.o.onSnapshot(now, merged);
       this.o.onStatus(this.status);

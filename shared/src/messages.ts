@@ -18,6 +18,9 @@ export interface SourceStatus {
   message?: string;
   /** Server poll interval in ms — lets the renderer self-tune its render delay. */
   pollMs?: number;
+  /** If the source is rate-limited, the earliest time (ms epoch) the server
+   *  will retry. Lets the UI show a countdown instead of a growing stale age. */
+  retryAfterMs?: number;
 }
 
 /** Server -> client. */

@@ -24,6 +24,7 @@ interface DiagSnapshot {
   source: string;
   aircraftReceived: number;
   lastApiUpdateMs: number | null;
+  retryAfterMs: number | null;
   lastWsMessageMs: number | null;
   wsReconnects: number;
   // config
@@ -42,6 +43,13 @@ function elapsed(ms: number | null): string {
   const s = (Date.now() - ms) / 1000;
   if (s < 2) return `${Math.round(s * 10) / 10}s ago`;
   return `${Math.round(s)}s ago`;
+}
+
+function countdown(ms: number | null | undefined): string {
+  if (ms == null) return "—";
+  const s = (ms - Date.now()) / 1000;
+  if (s <= 0) return "retrying…";
+  return `retrying in ${Math.ceil(s)}s`;
 }
 
 function StatusDot({ ok }: { ok: boolean }) {
@@ -117,9 +125,9 @@ export function Diagnostics() {
       .catch(() => setFlightStats(null));
   }, []);
 
-  // Re-render every 2s so elapsed times stay fresh.
+  // Re-render every second so elapsed times and retry countdowns stay fresh.
   useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 2000);
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
     return () => clearInterval(id);
   }, []);
 
@@ -133,6 +141,7 @@ export function Diagnostics() {
     source: state.status?.source ?? "unknown",
     aircraftReceived: state.aircraft.length,
     lastApiUpdateMs: state.status?.lastOk ?? null,
+    retryAfterMs: state.status?.retryAfterMs ?? null,
     lastWsMessageMs: lastWsMs,
     wsReconnects,
     theme: cfg?.theme ?? "—",
@@ -153,6 +162,7 @@ export function Diagnostics() {
       `Data source:          ${report.source}`,
       `Aircraft received:    ${report.aircraftReceived}`,
       `Last API update:      ${elapsed(report.lastApiUpdateMs)}`,
+      report.retryAfterMs ? `Rate limit backoff:   ${countdown(report.retryAfterMs)}` : null,
       `Last WS message:      ${elapsed(report.lastWsMessageMs)}`,
       `WS reconnects:        ${report.wsReconnects}`,
       ``,
@@ -163,7 +173,7 @@ export function Diagnostics() {
       `Stale threshold:      ${report.staleSec}s`,
       ``,
       `Browser:              ${report.userAgent}`,
-    ].join("\n");
+    ].filter((l) => l !== null).join("\n");
 
     try {
       await navigator.clipboard.writeText(text);
@@ -231,10 +241,24 @@ export function Diagnostics() {
           <Row label="Active in flight log">{flightStats?.activeAircraft ?? "—"}</Row>
           <Row label="Source status">
             <StatusDot ok={state.status?.ok ?? false} />
-            {state.status?.ok ? "ok" : "error"}
-            {state.status?.message ? ` · ${state.status.message}` : ""}
+            {state.status?.ok
+              ? "ok"
+              : state.status?.retryAfterMs != null
+              ? `rate limited · ${countdown(state.status.retryAfterMs)}`
+              : "error"}
+            {state.status?.message && !state.status?.retryAfterMs ? ` · ${state.status.message}` : ""}
           </Row>
-          <Row label="Last API update">{elapsed(state.status?.lastOk ?? null)}</Row>
+          <Row label="Last API update">
+            {state.status?.retryAfterMs != null
+              ? <>
+                  {elapsed(state.status?.lastOk ?? null)}
+                  <span style={{ opacity: 0.55, marginLeft: 8 }}>
+                    · {countdown(state.status.retryAfterMs)}
+                  </span>
+                </>
+              : elapsed(state.status?.lastOk ?? null)
+            }
+          </Row>
         </Section>
 
         <Section title="Config">
