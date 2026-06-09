@@ -6,6 +6,8 @@
 export type Theme = "ambient" | "telemetry" | "focus";
 export type LabelDensity = "all" | "nearestN" | "nearestOnly";
 export type DataSource = "radio" | "api";
+/** Ground-speed display unit. ADS-B reports knots; the rest are converted. */
+export type SpeedUnit = "kt" | "mph" | "kmh";
 
 export interface Palette {
   bg: string;
@@ -24,6 +26,15 @@ export interface Fonts {
   mono: string;
 }
 
+/** A saved place you can jump the view to from the control panel. */
+export interface LocationProfile {
+  id: string;
+  name: string;
+  lat: number;
+  lon: number;
+  radiusMiles: number;
+}
+
 export interface ShowFields {
   airline: boolean;
   flight: boolean;
@@ -39,7 +50,11 @@ export interface Config {
   // --- location & scope ---
   centerLat: number;
   centerLon: number;
+  /** Human-readable place name shown in the control panel. */
+  locationName: string;
   radiusMiles: number;
+  /** Saved places (airports/cities) switchable from the control panel. */
+  locationProfiles: LocationProfile[];
   /** Aircraft ICAO hex to keep centered. Empty string disables follow mode. */
   followFlightHex: string;
   /** Show moving geographic grid and nearby city labels while following. */
@@ -98,6 +113,8 @@ export interface Config {
   labelDensity: LabelDensity;
   nearestN: number;
   showFields: ShowFields;
+  /** Unit for the speed shown on labels (ADS-B is knots). */
+  speedUnit: SpeedUnit;
 
   // --- overlays ---
   rangeRings: boolean;
@@ -117,8 +134,12 @@ export interface Config {
   showSun: boolean;
   showMoon: boolean;
   showSatellites: boolean; // includes the ISS
+  /** Label non-ISS satellites with their names (the ISS is always labelled). */
+  satelliteLabels: boolean;
   /** Faintest star magnitude to draw (higher = more stars). */
   starMagLimit: number;
+  /** Faintest star magnitude to label with its name (higher = more names). */
+  starLabelMagLimit: number;
   /** Offset the sky clock for testing/scrubbing, minutes (0 = live). */
   skyTimeOffsetMin: number;
 
@@ -151,7 +172,9 @@ export const DEFAULT_CONFIG: Config = {
   // normally persist a user-selected location on first run.
   centerLat: 37.6213,
   centerLon: -122.379,
+  locationName: "San Francisco International",
   radiusMiles: 3,
+  locationProfiles: [],
   followFlightHex: "",
   showFollowContext: true,
 
@@ -206,6 +229,7 @@ export const DEFAULT_CONFIG: Config = {
     destination: true,
     registration: false,
   },
+  speedUnit: "kt",
 
   rangeRings: true,
   compass: true,
@@ -219,7 +243,9 @@ export const DEFAULT_CONFIG: Config = {
   showSun: true,
   showMoon: true,
   showSatellites: true,
+  satelliteLabels: false,
   starMagLimit: 3.5,
+  starLabelMagLimit: 0.3,
   skyTimeOffsetMin: 0,
 
   showDestArc: true,

@@ -174,22 +174,38 @@ export class Poller {
   setSource(source: DataSource): void {
     this.o.source = source;
     this.status.source = source;
+    this.syncApiTimer();
   }
 
   start(): void {
     if (this.timer) return;
     void this.tick();
     this.timer = setInterval(() => void this.tick(), this.o.pollMs);
-    if (this.o.supplementApi) {
-      void this.refreshApi();
-      this.apiTimer = setInterval(() => void this.refreshApi(), this.o.apiPollMs);
-    }
+    this.syncApiTimer();
   }
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     if (this.apiTimer) clearInterval(this.apiTimer);
     this.timer = null;
     this.apiTimer = null;
+  }
+
+  /**
+   * The supplement timer should only run when radio is primary — it exists to
+   * keep landing aircraft alive when local ADS-B drops them. When the API is
+   * itself the primary source, tick() already polls it, so a second timer just
+   * doubles the request rate into airplanes.live and causes 429s.
+   */
+  private syncApiTimer(): void {
+    const want = this.o.source === "radio" && this.o.supplementApi;
+    if (want && !this.apiTimer && this.timer) {
+      void this.refreshApi();
+      this.apiTimer = setInterval(() => void this.refreshApi(), this.o.apiPollMs);
+    } else if (!want && this.apiTimer) {
+      clearInterval(this.apiTimer);
+      this.apiTimer = null;
+      this.lastApi = [];
+    }
   }
 
   private async fetchList(source: DataSource, now: number): Promise<{ list: Aircraft[]; rateLimited: boolean; retryAfterSec?: number } | null> {

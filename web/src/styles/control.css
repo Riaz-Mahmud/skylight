@@ -218,6 +218,42 @@ main {
   background: color-mix(in srgb, var(--accent) 22%, var(--panel-2));
 }
 
+/* Saved location profile chips */
+.profile-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.profile-chip.on {
+  border-color: var(--accent);
+}
+.profile-chip .profile-name {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 7px 4px 7px 12px;
+  cursor: pointer;
+}
+.profile-chip.on .profile-name {
+  color: var(--text);
+}
+.profile-chip .profile-del {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  padding: 7px 10px 7px 6px;
+  cursor: pointer;
+}
+.profile-chip .profile-del:hover {
+  color: var(--bad);
+}
+
 /* Palette */
 .palette {
   display: grid;

@@ -14,6 +14,7 @@ import { Poller } from "./datasource.js";
 import { Hub } from "./hub.js";
 import { TleStore } from "./tle.js";
 import { FlightStats } from "./stats.js";
+import { resolveLocation } from "./geocode.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = resolve(__dirname, "../data");
