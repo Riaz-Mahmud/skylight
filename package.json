@@ -4,7 +4,7 @@
   "private": true,
   "description": "Skylight — project the aircraft passing overhead onto your ceiling, in real time, from an RTL-SDR.",
   "type": "module",
-  "packageManager": "pnpm@10.28.2",
+  "packageManager": "pnpm@11.5.2",
   "scripts": {
     "dev": "concurrently -n server,web -c green,cyan \"pnpm dev:server\" \"pnpm dev:web\"",
     "dev:api": "cross-env DATA_SOURCE=api pnpm dev",
