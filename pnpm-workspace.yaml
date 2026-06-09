@@ -2,8 +2,8 @@ packages:
   - server
   - web
 
-onlyBuiltDependencies:
-  - esbuild
+allowBuilds:
+  esbuild: true
 
 # Our lockfile is freshly resolved + pinned; don't reject just-published
 # transitive deps (electron-to-chromium / node-releases) on install.
