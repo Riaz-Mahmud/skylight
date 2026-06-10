@@ -919,6 +919,10 @@ export function Control() {
             <Slider value={cfg.trailSeconds} min={0} max={120} step={5} unit="s"
               onChange={(v) => set({ trailSeconds: v })} />
           </Row>
+          <Row label="Trail thickness">
+            <Slider value={cfg.trailWidthScale ?? 1} min={0.2} max={2} step={0.1}
+              onChange={(v) => set({ trailWidthScale: v })} />
+          </Row>
           <Row label="Color by altitude">
             <Toggle value={cfg.altitudeColor} onChange={(v) => set({ altitudeColor: v })} />
           </Row>
@@ -1101,6 +1105,15 @@ export function Control() {
           <Row label="Local time & distance">
             <Toggle value={cfg.showRouteDetail} onChange={(v) => set({ showRouteDetail: v })} />
           </Row>
+          <Row label="Speed vectors" hint="projected flight path line">
+            <Toggle value={cfg.showSpeedVectors} onChange={(v) => set({ showSpeedVectors: v })} />
+          </Row>
+          {cfg.showSpeedVectors && (
+            <Row label="Vector lookahead">
+              <Slider value={cfg.speedVectorMinutes} min={0.5} max={10} step={0.5} unit="m"
+                onChange={(v) => set({ speedVectorMinutes: v })} />
+            </Row>
+          )}
         </Section>
 
         <Section title="Palette">

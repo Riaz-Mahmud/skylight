@@ -3,7 +3,7 @@ import { type Aircraft, type Config, type Theme, DEFAULT_CONFIG } from "@shared/
 import { useStream } from "../lib/useStream.js";
 import { loadRuntimeAirports, registerAirports, type Airport } from "./airports.js";
 import { fetchNearbyAirports } from "../components/ourairports.js";
-import { Renderer, type AircraftHit } from "./renderer.js";
+import { Renderer, type AircraftHit, type SkyHit } from "./renderer.js";
 
 function greatCircleMiles(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const DEG = Math.PI / 180;
@@ -13,6 +13,12 @@ function greatCircleMiles(lat1: number, lon1: number, lat2: number, lon2: number
   const dλ = (lon2 - lon1) * DEG;
   const a = Math.sin(dφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(dλ / 2) ** 2;
   return 3958.8 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/** Convert an azimuth in degrees to a cardinal/intercardinal label, e.g. "NNW". */
+function bearingLabel(az: number): string {
+  const dirs = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
+  return dirs[Math.round(((az % 360) + 360) % 360 / 22.5) % 16];
 }
 
 const THEMES: Theme[] = ["ambient", "telemetry", "focus"];
@@ -106,6 +112,7 @@ export function Display() {
   const [rendererStats, setRendererStats] = useState({ total: 0, estimated: 0, stale: 0 });
   const [rendererError, setRendererError] = useState<string | null>(null);
   const [selectedHit, setSelectedHit] = useState<AircraftHit | null>(null);
+  const [selectedSkyHit, setSelectedSkyHit] = useState<SkyHit | null>(null);
 
   const [selectedAirport, setSelectedAirport] = useState<Airport | null>(null);
   const [selectedAirportPos, setSelectedAirportPos] = useState<{ x: number; y: number } | null>(null);
@@ -451,7 +458,7 @@ export function Display() {
       d.active = false;
 
       if (d.movedPx <= DRAG_THRESHOLD_PX) {
-        // It was a click — do aircraft and airport hit test.
+        // It was a click — do aircraft, airport, then sky hit test.
         rendererRef.current?.resetPan();
         canvasRef.current?.classList.remove("dragging");
         
@@ -459,10 +466,19 @@ export function Display() {
         if (acHit) {
           setSelectedHit(acHit);
           setSelectedAirport(null);
+          setSelectedSkyHit(null);
         } else {
           const apHit = rendererRef.current?.hitTestAirport(e.clientX, e.clientY) ?? null;
-          setSelectedAirport(apHit);
-          setSelectedHit(null);
+          if (apHit) {
+            setSelectedAirport(apHit);
+            setSelectedHit(null);
+            setSelectedSkyHit(null);
+          } else {
+            const skyHit = rendererRef.current?.hitTestSky(e.clientX, e.clientY) ?? null;
+            setSelectedSkyHit(skyHit);
+            setSelectedHit(null);
+            setSelectedAirport(null);
+          }
         }
         return;
       }
@@ -577,10 +593,19 @@ export function Display() {
           if (acHit) {
             setSelectedHit(acHit);
             setSelectedAirport(null);
+            setSelectedSkyHit(null);
           } else {
             const apHit = rendererRef.current?.hitTestAirport(t.clientX, t.clientY) ?? null;
-            setSelectedAirport(apHit);
-            setSelectedHit(null);
+            if (apHit) {
+              setSelectedAirport(apHit);
+              setSelectedHit(null);
+              setSelectedSkyHit(null);
+            } else {
+              const skyHit = rendererRef.current?.hitTestSky(t.clientX, t.clientY) ?? null;
+              setSelectedSkyHit(skyHit);
+              setSelectedHit(null);
+              setSelectedAirport(null);
+            }
           }
         }
         return;
@@ -612,6 +637,7 @@ export function Display() {
           canvasRef.current?.classList.remove("dragging");
           setSelectedHit(null);
           setSelectedAirport(null);
+          setSelectedSkyHit(null);
           break;
         case "r":
           connRef.current.patchConfig({ rotationDeg: (c.rotationDeg + 5) % 360 });
@@ -899,6 +925,51 @@ export function Display() {
             <button onClick={() => setSelectedAirport(null)}>
               Close
             </button>
+          </div>
+        </div>
+      )}
+
+      {selectedSkyHit && (
+        <div
+          className="sky-action-popover"
+          style={{
+            left: Math.max(12, Math.min(selectedSkyHit.x, window.innerWidth - 220)),
+            top:  Math.max(12, Math.min(selectedSkyHit.y + 24, window.innerHeight - 340)),
+          }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <div className="sky-action-kicker">
+            {selectedSkyHit.kind === "iss" ? "Space Station" :
+             selectedSkyHit.kind === "satellite" ? "Satellite" :
+             selectedSkyHit.kind === "planet" ? "Planet" :
+             selectedSkyHit.kind === "moon" ? "Moon" :
+             selectedSkyHit.kind === "sun" ? "Sun" : "Star"}
+          </div>
+          <div className="sky-action-name">{selectedSkyHit.name}</div>
+          <div className="sky-action-coords">
+            <span>{selectedSkyHit.alt.toFixed(1)}° above horizon</span>
+            <span>{bearingLabel(selectedSkyHit.az)}</span>
+          </div>
+
+          <div className="sky-photo-container">
+            <img src={`/sky-images/${selectedSkyHit.kind}.png`} alt={selectedSkyHit.name} />
+          </div>
+
+          {selectedSkyHit.kind === "iss" && (
+            <a
+              className="sky-action-link"
+              href="https://www.heavens-above.com/PassSummary.aspx"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              ISS pass predictions ↗
+            </a>
+          )}
+          {selectedSkyHit.kind === "moon" && (
+            <div className="sky-action-hint">Illumination visible in sky layer</div>
+          )}
+          <div className="sky-action-buttons">
+            <button onClick={() => setSelectedSkyHit(null)}>Close</button>
           </div>
         </div>
       )}

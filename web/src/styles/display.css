@@ -428,3 +428,94 @@ body,
   0%, 100% { opacity: 0.88; box-shadow: 0 4px 15px rgba(0,0,0,0.4); }
   50% { opacity: 1; box-shadow: 0 4px 25px rgba(0, 255, 255, 0.25); }
 }
+
+/* ── Sky object popover ─────────────────────────────────────────────────── */
+.sky-action-popover {
+  position: fixed;
+  z-index: 20;
+  width: 210px;
+  padding: 13px;
+  border: 1px solid rgba(174, 182, 198, 0.22);
+  border-radius: 12px;
+  background: rgba(8, 10, 15, 0.92);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(10px);
+  color: #e8ecff;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  cursor: default;
+}
+.sky-action-popover::before {
+  content: "";
+  position: absolute;
+  top: -7px;
+  left: 18px;
+  width: 12px;
+  height: 12px;
+  border-left: 1px solid rgba(174, 182, 198, 0.22);
+  border-top: 1px solid rgba(174, 182, 198, 0.22);
+  background: rgba(8, 10, 15, 0.92);
+  transform: rotate(45deg);
+}
+.sky-action-kicker {
+  color: #7d879a;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.sky-action-name {
+  margin-top: 5px;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.sky-action-coords {
+  display: flex;
+  gap: 12px;
+  margin-top: 6px;
+  color: #9ba4b5;
+  font-size: 10px;
+}
+.sky-action-hint {
+  margin-top: 6px;
+  color: #6b7280;
+  font-size: 9px;
+  line-height: 1.4;
+}
+.sky-action-link {
+  display: block;
+  margin-top: 8px;
+  color: #8cffd6;
+  font-size: 10px;
+  text-decoration: none;
+}
+.sky-action-link:hover {
+  text-decoration: underline;
+}
+.sky-action-buttons {
+  margin-top: 12px;
+}
+.sky-action-buttons button {
+  width: 100%;
+  border: 1px solid rgba(174, 182, 198, 0.22);
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: rgba(174, 182, 198, 0.08);
+  color: #c9cdd6;
+  cursor: pointer;
+  font: 11px "JetBrains Mono", ui-monospace, monospace;
+}
+
+.sky-photo-container {
+  position: relative;
+  width: 100%;
+  height: 105px;
+  margin-top: 8px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.sky-photo-container img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}

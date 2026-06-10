@@ -178,6 +178,15 @@ export interface AircraftHit {
   followed: boolean;
 }
 
+export interface SkyHit {
+  kind: "sun" | "moon" | "planet" | "satellite" | "iss" | "star";
+  name: string;
+  x: number;
+  y: number;
+  az: number;
+  alt: number;
+}
+
 export class Renderer {
   private ctx: CanvasRenderingContext2D;
   private issPulseAt?: number;
@@ -205,6 +214,7 @@ export class Renderer {
   private followVelocity: Meters = { east: 0, north: 0 };
   private activeFollowHex = "";
   private visibleHits: AircraftHit[] = [];
+  private skyHits: SkyHit[] = [];
   /** Tracks the last committed center so we can detect pan commits and
    *  invalidate smoothed renderedM positions on all tracks. */
   private lastCenterLat = NaN;
@@ -355,6 +365,38 @@ export class Renderer {
 
   getAircraftHit(hex: string): AircraftHit | null {
     return this.visibleHits.find((hit) => hit.aircraft.hex.toLowerCase() === hex.toLowerCase()) ?? null;
+  }
+
+  hitTestSky(clientX: number, clientY: number): SkyHit | null {
+    const rect = this.canvas.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    let best: SkyHit | null = null;
+    let bestDistance = 36; // px hit radius — larger for sky objects since they're small
+    for (const hit of this.skyHits) {
+      const distance = Math.hypot(hit.x - x, hit.y - y);
+      if (distance < bestDistance) {
+        best = hit;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Hit test all layers, prioritizing aircraft hits, then airport hits, then sky hits.
+   */
+  hitTestAll(clientX: number, clientY: number): { type: "aircraft"; hit: AircraftHit } | { type: "airport"; hit: Airport } | { type: "sky"; hit: SkyHit } | null {
+    const aircraftHit = this.hitTest(clientX, clientY);
+    if (aircraftHit) return { type: "aircraft", hit: aircraftHit };
+
+    const airportHit = this.hitTestAirport(clientX, clientY);
+    if (airportHit) return { type: "airport", hit: airportHit };
+
+    const skyHit = this.hitTestSky(clientX, clientY);
+    if (skyHit) return { type: "sky", hit: skyHit };
+
+    return null;
   }
 
   getAirportScreenPos(icao: string): { x: number; y: number } | null {
@@ -1311,6 +1353,8 @@ export class Renderer {
   private drawSky(cfg: Config, proj: ProjOpts): void {
     const ctx = this.ctx;
     const b = cfg.brightness;
+    // Rebuild sky hit targets every frame so they stay in sync with animation.
+    const newSkyHits: SkyHit[] = [];
 
     // Asterism lines (faint) — need star screen points by id.
     if (cfg.showStars && this.sky.stars.length) {
@@ -1411,13 +1455,16 @@ export class Renderer {
     }
 
     if (cfg.showMoon && this.sky.moon && this.sky.moon.alt > -2) {
-      this.drawMoon(this.projectSky(this.sky.moon.az, this.sky.moon.alt, cfg, proj),
-        this.sky.moon.illum ?? 1, this.sky.moon.waning ?? false, b);
+      const mp = this.projectSky(this.sky.moon.az, this.sky.moon.alt, cfg, proj);
+      this.drawMoon(mp, this.sky.moon.illum ?? 1, this.sky.moon.waning ?? false, b);
+      newSkyHits.push({ kind: "moon", name: "Moon", x: mp.x, y: mp.y, az: this.sky.moon.az, alt: this.sky.moon.alt });
     }
     if (cfg.showSun && this.sky.sun && this.sky.sun.alt > -2) {
-      this.drawSun(this.projectSky(this.sky.sun.az, this.sky.sun.alt, cfg, proj), b);
+      const sp = this.projectSky(this.sky.sun.az, this.sky.sun.alt, cfg, proj);
+      this.drawSun(sp, b);
+      newSkyHits.push({ kind: "sun", name: "Sun", x: sp.x, y: sp.y, az: this.sky.sun.az, alt: this.sky.sun.alt });
     }
-    
+
     let issCurrentlyVisible = false;
     if (cfg.showSatellites && this.sky.sats.length) {
       const now = performance.now();
@@ -1467,17 +1514,31 @@ export class Renderer {
         if (iss) {
           this.skyLabel({ x: p.x + 6, y: p.y - 6 }, "ISS", cfg, 0.9 * b, "#8CFFD6");
         } else if (sat.name) {
-          // Title-case the TLE name (e.g. "STARLINK-1234" → "Starlink-1234")
-          // so it reads quietly alongside the aircraft labels.
           const label = sat.name
             .split(/\s+/)
             .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
             .join(" ");
           this.skyLabel({ x: p.x + 4, y: p.y - 4 }, label, cfg, 0.45 * b, "#AAC8FF");
         }
+        newSkyHits.push({
+          kind: iss ? "iss" : "satellite",
+          name: sat.name ?? (iss ? "ISS" : "Satellite"),
+          x: p.x, y: p.y,
+          az: sat.az, alt: sat.alt,
+        });
       }
     }
     this.issVisible = issCurrentlyVisible;
+
+    // Planets hit targets (drawn earlier in the method)
+    if (cfg.showStars && this.sky.planets) {
+      for (const pl of this.sky.planets) {
+        const pt = this.projectSky(pl.az, pl.alt, cfg, proj);
+        newSkyHits.push({ kind: "planet", name: pl.name ?? "Planet", x: pt.x, y: pt.y, az: pl.az, alt: pl.alt });
+      }
+    }
+
+    this.skyHits = newSkyHits;
   }
 
   private drawSun(p: Point, b: number): void {
@@ -1573,10 +1634,13 @@ export class Renderer {
 
     if (δ < 1e-6) return;
 
-    const steps = 60;
+    // Only draw a short hint — 15% of the display radius ahead of the aircraft,
+    // not the full great-circle to the destination which spans the whole screen.
+    const hintFraction = Math.min(0.15, (cfg.radiusMiles * 1609.34 * 0.15) / (δ * 6371000));
+    const steps = 12;
     const pts: Point[] = [];
     for (let i = 0; i <= steps; i++) {
-      const f = i / steps;
+      const f = (i / steps) * hintFraction;
       const A = Math.sin((1 - f) * δ) / Math.sin(δ);
       const B = Math.sin(f * δ) / Math.sin(δ);
       const x = A * Math.cos(φ1) * Math.cos(λ1) + B * Math.cos(φ2) * Math.cos(λ2);
@@ -1591,20 +1655,18 @@ export class Renderer {
 
     const ctx = this.ctx;
     ctx.save();
-    ctx.strokeStyle = rgba(v.color, 0.18 * v.alpha);
-    ctx.lineWidth = 1.4;
-    ctx.setLineDash([3, 8]);
+    // Gradient from visible near the glyph to invisible at the tip.
+    const grad = ctx.createLinearGradient(pts[0].x, pts[0].y, pts[pts.length - 1].x, pts[pts.length - 1].y);
+    grad.addColorStop(0, rgba(v.color, 0.55 * v.alpha));
+    grad.addColorStop(1, rgba(v.color, 0));
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([3, 5]);
+    ctx.lineCap = "round";
     ctx.beginPath();
     ctx.moveTo(pts[0].x, pts[0].y);
     for (let i = 1; i <= steps; i++) {
-      // Prevent drawing horizontal lines across the entire screen if it wraps the antimeridian
-      if (Math.abs(pts[i].x - pts[i-1].x) > this.w / 2) {
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(pts[i].x, pts[i].y);
-      } else {
-        ctx.lineTo(pts[i].x, pts[i].y);
-      }
+      ctx.lineTo(pts[i].x, pts[i].y);
     }
     ctx.stroke();
     ctx.restore();
@@ -1693,14 +1755,36 @@ export class Renderer {
     const dt = cfg.speedVectorMinutes * 60;
     const aheadAbs = deadReckon(v.tr.renderedM, ac.track, ac.gs, dt);
     const aheadP = project(this.relativeToFollow(aheadAbs), proj);
+    
+    const dx = aheadP.x - v.p.x;
+    const dy = aheadP.y - v.p.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1) return;
+
+    // Cap the length to a reasonable percentage of the screen size (e.g., 8% of min screen dimension)
+    // to keep it as a clean indicator rather than a screen-spanning line.
+    const maxLenPx = Math.min(this.w, this.h) * 0.08;
+    let endX = aheadP.x;
+    let endY = aheadP.y;
+    if (len > maxLenPx) {
+      endX = v.p.x + (dx / len) * maxLenPx;
+      endY = v.p.y + (dy / len) * maxLenPx;
+    }
+
     const ctx = this.ctx;
     ctx.save();
     ctx.beginPath();
     ctx.moveTo(v.p.x, v.p.y);
-    ctx.lineTo(aheadP.x, aheadP.y);
-    ctx.strokeStyle = rgba(v.color, 0.45 * v.alpha);
+    ctx.lineTo(endX, endY);
+
+    // Beautiful gradient fading from full brightness near the plane to transparent at the tip
+    const grad = ctx.createLinearGradient(v.p.x, v.p.y, endX, endY);
+    grad.addColorStop(0, rgba(v.color, 0.45 * v.alpha));
+    grad.addColorStop(1, rgba(v.color, 0));
+
+    ctx.strokeStyle = grad;
     ctx.lineWidth = 1;
-    ctx.setLineDash([3, 5]);
+    ctx.setLineDash([3, 4]);
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.restore();
