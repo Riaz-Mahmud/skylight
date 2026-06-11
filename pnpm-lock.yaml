@@ -26,6 +26,9 @@ importers:
       express:
         specifier: ^4.21.2
         version: 4.22.2
+      satellite.js:
+        specifier: ^5.0.0
+        version: 5.0.0
       ws:
         specifier: ^8.18.0
         version: 8.21.0

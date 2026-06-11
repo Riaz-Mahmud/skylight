@@ -136,6 +136,8 @@ export interface Config {
   showSun: boolean;
   showMoon: boolean;
   showSatellites: boolean; // includes the ISS
+  /** Keep the view centered on the ISS satellite. */
+  followISS: boolean;
   /** Label non-ISS satellites with their names (the ISS is always labelled). */
   satelliteLabels: boolean;
   /** Faintest star magnitude to draw (higher = more stars). */
@@ -246,6 +248,7 @@ export const DEFAULT_CONFIG: Config = {
   showSun: true,
   showMoon: true,
   showSatellites: true,
+  followISS: false,
   satelliteLabels: false,
   starMagLimit: 3.5,
   starLabelMagLimit: 0.3,

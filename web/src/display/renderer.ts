@@ -25,7 +25,7 @@ import {
 } from "@shared/index.js";
 import { AIRPORTS, getAirportRevision, type Airport, type AirportArea } from "./airports.js";
 import { classifyGlyph, drawAircraftGlyph, GLYPH_SCALE } from "./aircraftGlyph.js";
-import { computeSky, type Sky, type Tle } from "./celestial.js";
+import { computeSky, getSatellitePosition, type Sky, type Tle } from "./celestial.js";
 import { ASTERISMS } from "./stars.js";
 import { CITIES } from "./cities.js";
 import { WeatherRadar } from "./weather.js";
@@ -631,7 +631,17 @@ export class Renderer {
   }
 
   private draw(): void {
-    const cfg = this.getConfig();
+    let cfg = this.getConfig();
+    if (cfg.followISS && this.tles.length) {
+      const issTle = this.tles.find((t) => /ISS|ZARYA/i.test(t.name));
+      if (issTle) {
+        const date = new Date(Date.now() + cfg.skyTimeOffsetMin * 60000);
+        const pos = getSatellitePosition(date, issTle);
+        if (pos) {
+          cfg = { ...cfg, centerLat: pos.lat, centerLon: pos.lon };
+        }
+      }
+    }
     const ctx = this.ctx;
     const now = performance.now();
     const frameDt = this.prevFrame ? (now - this.prevFrame) / 1000 : 0.016;
@@ -640,10 +650,20 @@ export class Renderer {
 
     this.weather.update(cfg);
 
-    // Detect pan commits: when centerLat/Lon changes, flush all smoothed
-    // renderedM values so trails and positions rebase to the new center cleanly.
+    // Detect center changes: when centerLat/Lon changes (due to pan, zoom, or ISS tracking),
+    // rebase all smoothed renderedM values so aircraft trails and positions shift smoothly.
     if (cfg.centerLat !== this.lastCenterLat || cfg.centerLon !== this.lastCenterLon) {
-      for (const tr of this.tracks.values()) tr.renderedM = undefined;
+      if (!isNaN(this.lastCenterLat) && !isNaN(this.lastCenterLon)) {
+        const shift = llToMeters(cfg.centerLat, cfg.centerLon, this.lastCenterLat, this.lastCenterLon);
+        for (const tr of this.tracks.values()) {
+          if (tr.renderedM) {
+            tr.renderedM.east -= shift.east;
+            tr.renderedM.north -= shift.north;
+          }
+        }
+      } else {
+        for (const tr of this.tracks.values()) tr.renderedM = undefined;
+      }
       this.lastCenterLat = cfg.centerLat;
       this.lastCenterLon = cfg.centerLon;
     }
@@ -699,7 +719,7 @@ export class Renderer {
         north: followed.renderedM.north + (followedPosition.north - followed.renderedM.north) * motionFactor,
       };
     }
-    this.updateFollowCamera(followHex, followed?.renderedM, frameDt);
+    this.updateFollowCamera(cfg.followISS ? "" : followHex, cfg.followISS ? undefined : followed?.renderedM, frameDt);
 
     this.updateSky(cfg, now);
     this.drawSky(cfg, proj);
@@ -1500,25 +1520,22 @@ export class Renderer {
           }
         }
         
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, iss ? 3 : 1.6, 0, Math.PI * 2);
         if (iss) {
-          ctx.fillStyle = `rgba(140,255,214,${0.95 * b})`;
-          ctx.shadowColor = `rgba(140,255,214,${b})`;
-          ctx.shadowBlur = 10;
+          this.drawIssStructure(ctx, p.x, p.y, 13, b);
+          this.skyLabel({ x: p.x + 11, y: p.y - 11 }, "ISS", cfg, 0.95 * b, "#8CFFD6");
         } else {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 1.6, 0, Math.PI * 2);
           ctx.fillStyle = `rgba(170,205,255,${0.65 * b})`;
-        }
-        ctx.fill();
-        ctx.shadowBlur = 0;
-        if (iss) {
-          this.skyLabel({ x: p.x + 6, y: p.y - 6 }, "ISS", cfg, 0.9 * b, "#8CFFD6");
-        } else if (sat.name) {
-          const label = sat.name
-            .split(/\s+/)
-            .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-            .join(" ");
-          this.skyLabel({ x: p.x + 4, y: p.y - 4 }, label, cfg, 0.45 * b, "#AAC8FF");
+          ctx.fill();
+
+          if (cfg.satelliteLabels && sat.name) {
+            const label = sat.name
+              .split(/\s+/)
+              .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+              .join(" ");
+            this.skyLabel({ x: p.x + 4, y: p.y - 4 }, label, cfg, 0.45 * b, "#AAC8FF");
+          }
         }
         newSkyHits.push({
           kind: iss ? "iss" : "satellite",
@@ -1539,6 +1556,75 @@ export class Renderer {
     }
 
     this.skyHits = newSkyHits;
+  }
+
+  private drawIssStructure(ctx: CanvasRenderingContext2D, px: number, py: number, size: number, b: number): void {
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(Math.PI / 4); // Rotate 45 degrees for space station dynamic profile
+
+    const alpha = 0.9 * b;
+    ctx.strokeStyle = `rgba(140,255,214,${alpha})`;
+    ctx.fillStyle = `rgba(140,255,214,${alpha})`;
+    ctx.lineWidth = 1.1;
+    ctx.shadowColor = `rgba(140,255,214,${b})`;
+    ctx.shadowBlur = 4;
+
+    // 1. Central truss: main horizontal bar
+    ctx.beginPath();
+    ctx.moveTo(-size, 0);
+    ctx.lineTo(size, 0);
+    ctx.stroke();
+
+    // 2. Central pressurized modules
+    ctx.fillRect(-size * 0.25, -size * 0.15, size * 0.5, size * 0.3);
+    
+    // Perpendicular lab modules
+    ctx.fillRect(-size * 0.08, -size * 0.35, size * 0.16, size * 0.7);
+
+    // 3. Solar arrays (orange/golden panels flanking the ends)
+    ctx.strokeStyle = `rgba(255, 200, 100, ${0.85 * b})`;
+    ctx.fillStyle = `rgba(255, 200, 100, ${0.3 * b})`;
+    ctx.lineWidth = 0.8;
+
+    // Left solar panel arrays
+    for (const x of [-size * 0.95, -size * 0.65]) {
+      ctx.beginPath();
+      ctx.rect(x - size * 0.08, -size * 0.45, size * 0.16, size * 0.35);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.rect(x - size * 0.08, size * 0.1, size * 0.16, size * 0.35);
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    // Right solar panel arrays
+    for (const x of [size * 0.5, size * 0.8]) {
+      ctx.beginPath();
+      ctx.rect(x - size * 0.08, -size * 0.45, size * 0.16, size * 0.35);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.rect(x - size * 0.08, size * 0.1, size * 0.16, size * 0.35);
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    // 4. Radiators (thin cyan panels perpendicular to the truss)
+    ctx.strokeStyle = `rgba(140,255,214,${0.65 * alpha})`;
+    ctx.fillStyle = `rgba(140,255,214,${0.15 * alpha})`;
+    ctx.lineWidth = 0.8;
+    for (const x of [-size * 0.3, size * 0.15]) {
+      ctx.beginPath();
+      ctx.rect(x, -size * 0.25, size * 0.12, size * 0.5);
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    ctx.restore();
   }
 
   private drawSun(p: Point, b: number): void {

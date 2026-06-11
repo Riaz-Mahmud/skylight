@@ -6,6 +6,26 @@ import type { Aircraft, Config, DataSource } from "@shared/index.js";
 import type { SourceStatus } from "@shared/index.js";
 import { lookupAirline, lookupType } from "./enrich/tables.js";
 import type { RouteEnricher } from "./enrich/routes.js";
+import type { Tle } from "./tle.js";
+import * as satellite from "satellite.js";
+
+function getSatellitePosition(date: Date, tle: Tle): { lat: number; lon: number } | null {
+  try {
+    const rec = satellite.twoline2satrec(tle.line1, tle.line2);
+    const pv = satellite.propagate(rec, date);
+    const pos = pv?.position;
+    if (!pos || typeof pos === "boolean") return null;
+    const gmst = satellite.gstime(date);
+    const posGd = satellite.eciToGeodetic(pos, gmst);
+    const R2D = 180 / Math.PI;
+    return {
+      lat: posGd.latitude * R2D,
+      lon: posGd.longitude * R2D,
+    };
+  } catch {
+    return null;
+  }
+}
 
 /** Raw readsb-style aircraft record (subset we use). */
 interface RawAircraft {
@@ -92,6 +112,7 @@ export interface PollerOptions {
   /** API poll cadence when supplementing (slower, to respect rate limits). */
   apiPollMs: number;
   getConfig: () => Config;
+  getTles: () => Tle[];
   enricher: RouteEnricher;
   onSnapshot: (now: number, aircraft: Aircraft[]) => void;
   onStatus: (status: SourceStatus) => void;
@@ -257,20 +278,36 @@ export class Poller {
 
   private buildApiUrl(): string {
     const c = this.o.getConfig();
-    const followHex = c.followFlightHex.toLowerCase();
-    if (followHex !== this.followTargetHex) {
-      this.followTargetHex = followHex;
-      this.followTargetPosition = null;
-      this.followedAircraft = null;
+    let lat = c.centerLat;
+    let lon = c.centerLon;
+
+    if (c.followISS) {
+      const tles = this.o.getTles();
+      const issTle = tles.find((t) => /ISS|ZARYA/i.test(t.name));
+      if (issTle) {
+        const pos = getSatellitePosition(new Date(), issTle);
+        if (pos) {
+          lat = pos.lat;
+          lon = pos.lon;
+        }
+      }
+    } else {
+      const followHex = c.followFlightHex.toLowerCase();
+      if (followHex !== this.followTargetHex) {
+        this.followTargetHex = followHex;
+        this.followTargetPosition = null;
+        this.followedAircraft = null;
+      }
+      const followed = followHex
+        ? this.last.find((ac) => ac.hex.toLowerCase() === c.followFlightHex.toLowerCase())
+        : undefined;
+      if (followed?.lat != null && followed.lon != null) {
+        this.followTargetPosition = { lat: followed.lat, lon: followed.lon };
+      }
+      lat = this.followTargetPosition?.lat ?? c.centerLat;
+      lon = this.followTargetPosition?.lon ?? c.centerLon;
     }
-    const followed = followHex
-      ? this.last.find((ac) => ac.hex.toLowerCase() === c.followFlightHex.toLowerCase())
-      : undefined;
-    if (followed?.lat != null && followed.lon != null) {
-      this.followTargetPosition = { lat: followed.lat, lon: followed.lon };
-    }
-    const lat = this.followTargetPosition?.lat ?? c.centerLat;
-    const lon = this.followTargetPosition?.lon ?? c.centerLon;
+
     const r = Math.min(250, Math.ceil(c.radiusMiles * NM_PER_MILE) + 1);
     return this.o.apiUrlTemplate
       .replace("{lat}", String(lat))

@@ -32,6 +32,10 @@ export class TleStore {
   private fetchedAt = 0;
   private ttlMs = 24 * 3600_000;
 
+  getTlesSync(): Tle[] {
+    return this.tles;
+  }
+
   constructor(
     private cachePath: string,
     private url = process.env.TLE_URL ?? DEFAULT_URL,

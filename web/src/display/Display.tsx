@@ -773,13 +773,15 @@ export function Display() {
         className="display-canvas"
       />
 
-      {cfg?.followFlightHex && (
+      {(cfg?.followFlightHex || cfg?.followISS) && (
         <>
           <div className="follow-status">
             <span>TRACKING</span>
-            {state.aircraft.find(
-              (ac) => ac.hex.toLowerCase() === cfg.followFlightHex.toLowerCase(),
-            )?.flight ?? cfg.followFlightHex.toUpperCase()}
+            {cfg.followISS
+              ? "ISS SPACE STATION"
+              : state.aircraft.find(
+                  (ac) => ac.hex.toLowerCase() === cfg.followFlightHex.toLowerCase(),
+                )?.flight ?? cfg.followFlightHex.toUpperCase()}
           </div>
         </>
       )}

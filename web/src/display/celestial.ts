@@ -187,3 +187,18 @@ export function nextISSPass(
   }
   return null;
 }
+
+/** Compute the current geographic latitude/longitude of a satellite by TLE */
+export function getSatellitePosition(date: Date, tle: Tle): { lat: number; lon: number } | null {
+  const rec = getSatrec(tle);
+  if (!rec) return null;
+  const pv = satellite.propagate(rec, date);
+  const pos = pv?.position;
+  if (!pos || typeof pos === "boolean") return null;
+  const gmst = satellite.gstime(date);
+  const posGd = satellite.eciToGeodetic(pos, gmst);
+  return {
+    lat: posGd.latitude * R2D,
+    lon: posGd.longitude * R2D,
+  };
+}
